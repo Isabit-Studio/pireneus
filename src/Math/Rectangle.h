@@ -20,28 +20,15 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include <stdio.h>
+#ifndef _H_RECTANGLE
+#define _H_RECTANGLE
 
-#include "Application/Application.h"
-
-int main(int argc, char** argv)
+typedef struct Rectangle
 {
-    // Create a new application
-    Application* app = Application_Create("Hello Pireneus", 100, 100, 800, 600);
-    // Check if the application was created
-    if (app == NULL)
-    {
-        printf_s("Failed to create the application !!!\n");
-        return 1;
-    }
+	int x;
+	int y;
+	int width;
+	int height;
+} _Rectangle;
 
-    // Run the application
-    Application_Run(app);
-
-    printf_s("Hello Pireneus !\n");
-
-    // Destroy the application
-    Application_Destroy(app);
-    
-    return 0;
-}
+#endif // _H_RECTANGLE

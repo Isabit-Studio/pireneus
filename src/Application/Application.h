@@ -20,28 +20,38 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#include <stdio.h>
+#ifndef _H_APPLICATION
+#define _H_APPLICATION
 
-#include "Application/Application.h"
+#include <Windows.h>
+// Remove unused functions
+#define WIN32_LEAN_AND_MEAN
 
-int main(int argc, char** argv)
+#include "../Math/Rectangle.h"
+
+// Application struct
+typedef struct Application
 {
-    // Create a new application
-    Application* app = Application_Create("Hello Pireneus", 100, 100, 800, 600);
-    // Check if the application was created
-    if (app == NULL)
-    {
-        printf_s("Failed to create the application !!!\n");
-        return 1;
-    }
+	// Window name
+	const char* name;
+	// Window size
+	struct Rectangle size;
 
-    // Run the application
-    Application_Run(app);
+	// Window handle
+	HWND handle;
+} Application;
 
-    printf_s("Hello Pireneus !\n");
+// Create a new application
+Application* Application_Create(const char* name, int x, int y, int width, int height);
 
-    // Destroy the application
-    Application_Destroy(app);
-    
-    return 0;
-}
+// Message loop
+void Application_Run(Application* app);
+
+// Window procedure
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+
+// Destroy an application
+void Application_Destroy(Application* app);
+
+
+#endif // !_H_APPLICATION
