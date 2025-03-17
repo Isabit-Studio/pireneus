@@ -23,12 +23,12 @@
 #ifndef _H_RECTANGLE
 #define _H_RECTANGLE
 
-typedef struct Rectangle
+struct Rectangle
 {
 	int x;
 	int y;
 	int width;
 	int height;
-} _Rectangle;
+};
 
 #endif // _H_RECTANGLE
