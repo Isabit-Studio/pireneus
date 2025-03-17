@@ -1,5 +1,7 @@
-# Xmake cache
-.xmake/
+# CMake clangd cache
+.cache/
+
+# Build folder
 build/
 
 # MacOS Cache
