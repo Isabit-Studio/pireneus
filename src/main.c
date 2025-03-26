@@ -21,24 +21,22 @@
 // SOFTWARE.
 
 #include <stdio.h>
+#include <string.h>
 
 #include "Application/Application.h"
+#include "Utils/Macros.h"
 
 int main(int argc, char** argv)
 {
     // Create a new application
     Application* app = Application_Create("Hello Pireneus", 100, 100, 800, 600);
     // Check if the application was created
-    if (app == NULL)
-    {
-        printf_s("Failed to create the application !!!\n");
-        return 1;
-    }
+    NULL_RETURN_MSG(app, "Failed to create the application", 1);
 
     // Run the application
     Application_Run(app);
 
-    printf_s("Hello Pireneus !\n");
+    printf("Hello Pireneus !\n");
 
     // Destroy the application
     Application_Destroy(app);

@@ -21,11 +21,14 @@
 // SOFTWARE.
 
 #include "Application.h"
+#include <string.h>
 
 // Create a new application memory safe
 Application* Application_Create(const char* name, int x, int y, int width, int height)
 {
-	Application* app = (Application*)malloc(sizeof(Application));
+	Application* app = malloc(sizeof(Application));
+	// Check if the memory was allocated
+	NULL_PANIC(app);
 	app->name = name;
 	app->size.x = x;
 	app->size.y = y;

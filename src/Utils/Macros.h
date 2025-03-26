@@ -20,42 +20,19 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-#ifndef _H_APPLICATION
-#define _H_APPLICATION
+#ifndef _H_MACROS
+#define _H_MACROS
 
-#include <stdlib.h>
-#include <stdio.h>
+#define NULL_PANIC(ptr) if (ptr == NULL) { printf("PANIC: NULL pointer at %s:%d\n", __FILE__, __LINE__); exit(1); }
+#define NULL_PANIC_MSG(ptr, msg) if (ptr == NULL) { printf("PANIC: %s at %s:%d\n", msg, __FILE__, __LINE__); exit(1); }
 
-#include <Windows.h>
-// Remove unused functions
-#define WIN32_LEAN_AND_MEAN
+#define NULL_RETURN(ptr, ret) if (ptr == NULL) { printf("PANIC: NULL pointer at %s:%d\n", __FILE__, __LINE__); return ret; }
+#define NULL_RETURN_MSG(ptr, msg, ret) if (ptr == NULL) { printf("PANIC: %s at %s:%d\n", msg, __FILE__, __LINE__); return ret; }
 
-#include "../Math/Rectangle.h"
-#include "../Utils/Macros.h"
+#define NULL_RETURN_VOID(ptr) if (ptr == NULL) { printf("PANIC: NULL pointer at %s:%d\n", __FILE__, __LINE__); return; }
+#define NULL_RETURN_MSG_VOID(ptr, msg) if (ptr == NULL) { printf("PANIC: %s at %s:%d\n", msg, __FILE__, __LINE__); return; }
 
-// Application struct
-typedef struct Application
-{
-	// Window name
-	const char* name;
-	// Window size
-	struct Rectangle size;
+#define NULL_RETURN_FALSE(ptr) if (ptr == NULL) { printf("PANIC: NULL pointer at %s:%d\n", __FILE__, __LINE__); return false; }
+#define NULL_RETURN_MSG_FALSE(ptr, msg) if (ptr == NULL) { printf("PANIC: %s at %s:%d\n", msg, __FILE__, __LINE__); return false; }
 
-	// Window handle
-	HWND handle;
-} Application;
-
-// Create a new application
-Application* Application_Create(const char* name, int x, int y, int width, int height);
-
-// Message loop
-void Application_Run(Application* app);
-
-// Window procedure
-LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
-
-// Destroy an application
-void Application_Destroy(Application* app);
-
-
-#endif // !_H_APPLICATION
+#endif // _H_MACROS
