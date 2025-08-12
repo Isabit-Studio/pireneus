@@ -1,0 +1,127 @@
+[core]
+    # Utiliser LF comme saut de ligne sur tous les systèmes
+    eol = lf
+    autocrlf = false
+    # Ignorer les modifications de permissions
+    fileMode = false
+    # Éviter les problèmes d'espaces et de fins de ligne
+    whitespace = trailing-space,space-before-tab,indent-with-non-tab
+    # Améliorer les performances pour les grands dépôts
+    preloadIndex = true
+
+[pull]
+    # Toujours faire un rebase au lieu d'un merge lors des pulls
+    rebase = true
+
+[push]
+    # Pousser seulement la branche courante par défaut
+    default = current
+    # creer automatiquement la branche remote
+    autoSetupRemote = true
+    # Vérifier les refs lors des push
+    followTags = true
+
+[fetch]
+    # Supprimer automatiquement les références distantes qui n'existent plus
+    prune = true
+    # Récupérer tous les tags
+    tags = true
+
+[rebase]
+    # Automatic stashing and unstashing while rebasing
+    autoStash = true
+    # Inclure automatiquement les options --autosquash pour faciliter les fixup
+    autoSquash = true
+
+[merge]
+    # Ajouter des messages aux commits de merge
+    log = true
+    # Montrer le diff du merge
+    conflictstyle = diff3
+
+[diff]
+    # Améliorer la détection des renames
+    renames = copies
+    # Activer les statistiques par défaut
+    statGraphWidth = 20
+    # Algorithme plus intelligent pour les diffs
+    algorithm = histogram
+    # Meilleure colorisation des diffs
+    colorMoved = default
+
+[color]
+    # Activer la colorisation
+    ui = auto
+    branch = auto
+    diff = auto
+    status = auto
+
+[branch]
+    # Auto-setup des branches pour track les remotes
+    autoSetupMerge = always
+    # Rebase automatique lors des pulls sur les branches
+    autoSetupRebase = always
+
+[status]
+    # Afficher le statut de façon plus détaillée
+    showUntrackedFiles = all
+    # Plus d'information sur les branches
+    showStash = true
+
+[alias]
+    # Raccourcis utiles
+    pf = push --force-with-lease
+    st = status -sb
+    co = commit -m
+    ck = checkout
+    ckb = checkout -b
+    sb = switch -b
+    br = branch -v
+    lg = log --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit
+    amend = commit --amend --no-edit
+    wip = !git add . && git commit -m "WIP"
+    undo = reset HEAD~1 --mixed
+    unstage = reset HEAD --
+    last = log -1 HEAD
+    # Liste des branches avec la date du dernier commit
+    recent = for-each-ref --sort=-committerdate --count=10 --format='%(refname:short)' refs/heads/
+    # Chercher dans l'historique
+    find = "!f() { git log --pretty=format:'%C(yellow)%h %Cblue%ad %Creset%s%Cgreen [%cn] %Cred%d' --decorate --date=short --grep=$1; }; f"
+    # Pousser une nouvelle branche et configurer le tracking
+    publish = "!f() { git push -u origin $(git symbolic-ref --short HEAD); }; f"
+    # Nettoyer les branches fusionnées
+    cleanup = "!f() { git branch --merged | grep -v '\\*\\|master\\|main\\|develop' | xargs -n 1 git branch -d; }; f"
+    # Liste des fichiers modifiés dans le dernier commit
+    files = "!f() { git diff-tree --no-commit-id --name-only -r ${1:-HEAD}; }; f"
+    # Créer un nouveau fixup (pour utiliser avec rebase -i --autosquash)
+    fixup = "!f() { git commit --fixup=$1; }; f"
+
+# [advice]
+#     # Réduire les messages d'aide verbeux de Git
+#     pushNonFastForward = false
+#     statusHints = false
+#     commitBeforeMerge = false
+#     resolveConflict = false
+#     implicitIdentity = false
+#     detachedHead = false
+
+[credential]
+    # Cache des identifiants
+    helper = cache --timeout=3600
+
+[init]
+    # Nom de la branche par défaut pour les nouveaux dépôts
+    defaultBranch = main
+
+[rerere]
+    # Réutiliser les résolutions de conflits enregistrées
+    enabled = true
+    autoUpdate = true
+
+[log]
+    # Suivre les renames dans le log
+    follow = true
+
+[protocol]
+    # Améliorer la sécurité
+    version = 2
