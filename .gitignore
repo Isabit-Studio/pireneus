@@ -97,12 +97,11 @@ build/
 .task/
 .task/checksum/
 .vscode/
-testouille
 
 project.profile.ps1
 .bashrc
 .zshrc
-docs/
+
 .ctest-cache.json
 ctr
 *.lock
