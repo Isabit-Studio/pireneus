@@ -1,0 +1,178 @@
+.TH PYRENEUS-STYLE 6 "August 13, 2025" "" "C++ Coding Conventions"
+.SH NAME
+pyreneus-style \- id Software-inspired C++ coding conventions
+.SH GENERAL
+Use real tabs equal to 4 spaces.
+.PP
+Use trailing braces everywhere (if, else, functions, structures, typedefs, class definitions):
+.nf
+if ( x ) {
+}
+
+if ( x ) {
+} else {
+}
+.fi
+Pad parenthesized expressions with spaces:
+.nf
+if ( x ) {
+}
+x = ( y * 0.5f );
+.fi
+Use precision for floating point values unless a double is explicitly needed:
+.nf
+float f = 0.5f;
+float f = 1.0f;
+.fi
+Function names start with an upper case letter. In multi-word names, each word starts with an upper case:
+.nf
+void Function( void );
+void ThisFunctionDoesSomething( void );
+.fi
+Standard function header:
+.nf
+/*
+====================
+FunctionName
+
+  Description
+====================
+*/
+.fi
+Variable names start with a lower case letter. In multi-word variables, the first word is lower case and each next word is upper case:
+.nf
+float x;
+float maxDistanceFromPlane;
+.fi
+Typedef, struct, and enum names follow variable naming, but always end with _t.
+Enum constants use all upper case characters; multiple words are separated with an underscore:
+.nf
+enum contact_t {
+    CONTACT_NONE,
+    CONTACT_EDGE,
+    CONTACT_MODELVERTEX,
+    CONTACT_TRMVERTEX
+};
+.fi
+Names of recursive functions end with _r.
+Defined names use all upper case characters; multiple words are separated with an underscore:
+.nf
+#define SIDE_FRONT 0
+.fi
+Use const as much as possible. Examples:
+.nf
+const int *p;        // pointer to const int
+int * const p;       // const pointer to int
+const int * const p; // const pointer to const int
+.fi
+Do not use "int const *p".
+.SH CLASSES
+Standard class header:
+.nf
+/*
+===============================================================================
+
+Description
+
+===============================================================================
+*/
+.fi
+Class names start with "id" and each successive word starts with an upper case:
+.nf
+class idVec3;
+.fi
+Class variables use the same naming convention as variables.
+Class methods use the same naming convention as functions.
+Indent member names to form readable columns; put the pointer asterisk with the type:
+.nf
+class idVec3 {
+    float        x;
+    float        y;
+    float        z;
+    float        Length( void ) const;
+    const float *ToFloatPtr( void ) const;
+};
+.fi
+Order class members as follows:
+.IP 1. 4
+list of friend classes
+.IP 2. 4
+public variables
+.IP 3. 4
+public methods
+.IP 4. 4
+protected variables
+.IP 5. 4
+protected methods
+.IP 6. 4
+private variables
+.IP 7. 4
+private methods
+.PP
+Make methods const when they do not modify class variables.
+Avoid use of const_cast. When an editable object is required but only const versions are accessible, provide a function that clearly returns an editable version of the object, keeping control of const-ness within the object rather than the caller.
+Return const objects unless the typical usage of the object is to change its state (e.g., media objects like idDecls should generally be const; entity types that are commonly mutated may be non-const).
+.PP
+Function overloading should be avoided in most cases.
+Prefer explicitly named functions, for example:
+.nf
+const idAnim *GetAnimByIndex( int index ) const;
+const idAnim *GetAnimByName( const char *name ) const;
+const idAnim *GetRandomAnim( float randomDiversity ) const;
+.fi
+Overloading purely to add a const-accessible variant is acceptable:
+.nf
+class idAnimatedEntity : public idEntity {
+    idAnimator *GetAnimator( void );
+    const idAnimator *GetAnimator( void ) const;
+};
+.fi
+For media types that are normally const, avoid operator overloading that would obscure editability; instead, provide clearly named editable accessors:
+.nf
+class idDeclMD5 : public idDecl {
+    const idMD5Anim *GetAnim( animHandle_t handle ) const;
+    idMD5Anim *GetEditableAnim( animHandle_t handle );
+};
+.fi
+.SH ID STUDIO NAMES
+Naming conventions for UI classes:
+.nf
+id<name>Dlg      // dialog class
+id<name>Ctrl     // dialog control class
+id<name>Frm      // frame window
+id<name>View     // view window
+id<name>         // any other class
+.fi
+.SH FILE NAMES
+Each class should be in a separate source file unless grouping several smaller classes makes sense.
+The file name should match the class name without the "id" prefix (preserving upper/lower case).
+Example:
+.nf
+class idWinding;
+
+files:
+Winding.cpp
+Winding.h
+.fi
+When a class spans multiple files, use the class name without "id", then an underscore and a subsection name.
+Example:
+.nf
+class idRenderWorld;
+
+files:
+RenderWorld_load.cpp
+RenderWorld_demo.cpp
+RenderWorld_portals.cpp
+.fi
+When a class is a public virtual interface to a subsystem, place the public interface in a header named after the class without "id".
+Place the definition of the implementing class in a header named after the class without "id" and ending with "_local.h", and place the implementation in a .cpp file with the class name without "id".
+Example:
+.nf
+class idRenderWorld;
+
+RenderWorld.h        // public virtual idRenderWorld interface
+RenderWorld_local.h  // definition of class idRenderWorldLocal
+RenderWorld.cpp      // implementation of idRenderWorldLocal
+.fi
+.SH AUTHORS
+id Software original style guide, reformatted as a classic manpage for Pyreneus.
