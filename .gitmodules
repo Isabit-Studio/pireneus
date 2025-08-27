@@ -1,0 +1,3 @@
+[submodule "cli-app"]
+	path = cli-app
+	url = https://github.com/obiwor/cli-app.git
