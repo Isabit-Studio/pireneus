@@ -14,7 +14,7 @@ relpath() {
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-SCRIPT="$ROOT_DIR/scripts/cmake/sh/new_module.sh"
+SCRIPT="$ROOT_DIR/scripts/sh/cmake/new_module.sh"
 
 if [ ! -x "$SCRIPT" ]; then
   echo "❌ Erreur : $SCRIPT n'existe pas ou n'est pas exécutable"

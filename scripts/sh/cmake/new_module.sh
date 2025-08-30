@@ -11,18 +11,14 @@ fi
 MODULE_NAME=$1
 MODULE_PATH=$2
 
+
 # Déduit la racine d'include à utiliser
-if [[ "$MODULE_PATH" == libs/* ]]; then
-  INCLUDE_LINES='
-    ${ROOT_DIR}/libs
-  '
-elif [[ "$MODULE_PATH" == src/* ]]; then
+if [[ "$MODULE_PATH" == src/* ]]; then
   INCLUDE_LINES='
     ${ROOT_DIR}/src
-    ${ROOT_DIR}/libs
-  '
+'
 else
-  echo "Erreur : le chemin doit commencer par libs/ ou src/"
+  echo "Erreur : le chemin doit commencer par src/"
   exit 1
 fi
 
@@ -64,7 +60,7 @@ if(EXISTS \${MODULE_STD_MACRO})
     include(\${MODULE_STD_MACRO})
 endif()
 
-set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD 99 )
 
 
 get_filename_component(ROOT_DIR "\${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)
@@ -88,7 +84,7 @@ target_include_directories(\${PROJECT_NAME}
 )
 
 target_compile_options(\${PROJECT_NAME} PRIVATE
-    -O1 -Wall -Wextra -Wpedantic -std=c11
+    -O1 -Wall -Wextra -Wpedantic -std=c99
     -Wshadow -Wcast-align -Wunused -Wold-style-definition
     -Wmissing-prototypes -Wno-unused-parameter -Werror
     -Wstrict-prototypes -Wpointer-arith -Wwrite-strings
@@ -142,5 +138,12 @@ if(BUILD_TESTING)
 endif()
 
 EOF
+
+cat > "$MODULE_PATH/.gitignore" <<EOF
+
+bin/
+
+EOF
+
 
 echo "✅ Module '${MODULE_NAME}' created at '${MODULE_PATH}'"
