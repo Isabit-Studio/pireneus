@@ -1,41 +1,25 @@
 #include <stdio.h>
 #include <SDL3/SDL.h>
 
+#include "platforms/platforms_window.h"
+
 int main(int argc, char **argv)
 {
-    if ( SDL_Init(SDL_INIT_VIDEO) == false )
+    if (!create_window("Pireneus Engine", 800, 600))
     {
-        printf("Unable to initialize SDL: %s\n", SDL_GetError());
-
-        return 1;
+        printf("Failed to create window.\n");
+        return -1;
     }
-
-    SDL_Window *window;
-    
-    if (window = SDL_CreateWindow( "Pireneus", 800, 600, SDL_WINDOW_RESIZABLE) == NULL)
-    {
-        printf("Could not create window: %s\n", SDL_GetError());
-        
-        SDL_Quit();
-        
-        return 1;
-    }
-
-    SDL_Event event;
-    printf( "Hello, Pireneus!\n" );
 
     while (1)
     {
-        SDL_PollEvent( &event );
-
-        if (event.type == SDL_EVENT_QUIT)
+        if (!handle_events())
         {
             break;
         }
     }
-
-    SDL_DestroyWindow( window );
-    SDL_Quit();
     
+    destroy_window();
+
     return 0;
 }
