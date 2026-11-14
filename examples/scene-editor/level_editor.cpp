@@ -2803,6 +2803,197 @@ static void draw_view_grid(ImDrawList* draw_list, const OrthoView* view, ImVec2 
     }
 }
 
+static void object_rect_2d(const OrthoView* view, ImVec2 center, const SceneObject* object, ImVec2* out_lo, ImVec2* out_hi);
+
+// --- Wireframes of models in the 2D views ---
+//
+// Models are flattened into separate triangles (each with its own vertices), so drawing every triangle's
+// outline draws every edge twice, plus all the ones too small to see : a dense sphere, in three views,
+// overflowed the renderer's per-frame vertex budget and whole parts of the UI went missing. Each model's
+// unique edges are built once and cached ; edges outside the view or shorter than a pixel are skipped.
+
+#define MODEL_EDGE_CACHE_SIZE 32
+#define MODEL_EDGE_MAX_INDICES 300000 // past this, the model's bounds are drawn instead
+
+typedef struct
+{
+    const void* key;        // the model's vertex array
+    int index_count;
+    float* points;          // unique positions, xyz
+    int point_count;
+    int* edges;             // pairs of indices into points
+    int edge_count;
+} ModelEdges;
+
+static ModelEdges model_edges[MODEL_EDGE_CACHE_SIZE];
+static int model_edges_next;     // the entry replaced next, round robin
+static ImVec2 view_clip_lo;      // the 2D view being drawn, for culling
+static ImVec2 view_clip_hi;
+
+static uint64_t hash_u64(uint64_t x)
+{
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    x *= 0xc4ceb9fe1a85ec53ULL;
+    x ^= x >> 33;
+    return x;
+}
+
+static void free_model_edges(ModelEdges* entry)
+{
+    SDL_free(entry->points);
+    SDL_free(entry->edges);
+    SDL_zerop(entry);
+}
+
+void level_editor_free_caches(void)
+{
+    for (int i = 0; i < MODEL_EDGE_CACHE_SIZE; i++)
+    {
+        free_model_edges(&model_edges[i]);
+    }
+
+    model_edges_next = 0;
+}
+
+// Welds the model's vertices by position (to 0.1 mm), then keeps each triangle edge once.
+static const ModelEdges* get_model_edges(const ModelData* data)
+{
+    for (int i = 0; i < MODEL_EDGE_CACHE_SIZE; i++)
+    {
+        if (model_edges[i].key == data->vertices && model_edges[i].index_count == data->index_count)
+        {
+            return &model_edges[i];
+        }
+    }
+
+    ModelEdges* entry = &model_edges[model_edges_next];
+    model_edges_next = (model_edges_next + 1) % MODEL_EDGE_CACHE_SIZE;
+    free_model_edges(entry);
+
+    int capacity = 1;
+
+    while (capacity < data->index_count * 2)
+    {
+        capacity *= 2;
+    }
+
+    // One open-addressing table, reused : first positions -> point index, then edge keys.
+    uint64_t* keys = (uint64_t*)SDL_malloc(sizeof(uint64_t) * (size_t)capacity);
+    int* values = (int*)SDL_malloc(sizeof(int) * (size_t)capacity);
+    int* point_of_vertex = (int*)SDL_malloc(sizeof(int) * (size_t)SDL_max(1, data->vertex_count));
+    entry->points = (float*)SDL_malloc(sizeof(float) * 3 * (size_t)SDL_max(1, data->vertex_count));
+    entry->edges = (int*)SDL_malloc(sizeof(int) * 2 * (size_t)SDL_max(1, data->index_count));
+
+    for (int i = 0; i < capacity; i++)
+    {
+        values[i] = -1;
+    }
+
+    for (int v = 0; v < data->vertex_count; v++)
+    {
+        const MeshVertex* vertex = &data->vertices[v];
+        int32_t q[3] = { (int32_t)SDL_lroundf(vertex->x * 1e4f), (int32_t)SDL_lroundf(vertex->y * 1e4f), (int32_t)SDL_lroundf(vertex->z * 1e4f) };
+        uint64_t key = ((uint64_t)(uint32_t)q[0] * 73856093ULL) ^ ((uint64_t)(uint32_t)q[1] * 19349663ULL << 21) ^ ((uint64_t)(uint32_t)q[2] * 83492791ULL << 42);
+        int slot = (int)(hash_u64(key) & (uint64_t)(capacity - 1));
+        int found = -1;
+
+        while (values[slot] >= 0)
+        {
+            const float* p = &entry->points[values[slot] * 3];
+
+            if (keys[slot] == key && SDL_fabsf(p[0] - vertex->x) < 1e-4f && SDL_fabsf(p[1] - vertex->y) < 1e-4f && SDL_fabsf(p[2] - vertex->z) < 1e-4f)
+            {
+                found = values[slot];
+                break;
+            }
+
+            slot = (slot + 1) & (capacity - 1);
+        }
+
+        if (found < 0)
+        {
+            found = entry->point_count++;
+            entry->points[found * 3 + 0] = vertex->x;
+            entry->points[found * 3 + 1] = vertex->y;
+            entry->points[found * 3 + 2] = vertex->z;
+            keys[slot] = key;
+            values[slot] = found;
+        }
+
+        point_of_vertex[v] = found;
+    }
+
+    for (int i = 0; i < capacity; i++)
+    {
+        values[i] = -1;
+    }
+
+    for (int t = 0; t + 2 < data->index_count; t += 3)
+    {
+        for (int k = 0; k < 3; k++)
+        {
+            int a = point_of_vertex[data->indices[t + k]];
+            int b = point_of_vertex[data->indices[t + (k + 1) % 3]];
+
+            if (a == b)
+            {
+                continue;
+            }
+
+            uint64_t key = a < b ? ((uint64_t)a << 32 | (uint32_t)b) : ((uint64_t)b << 32 | (uint32_t)a);
+            int slot = (int)(hash_u64(key) & (uint64_t)(capacity - 1));
+            bool exists = false;
+
+            while (values[slot] >= 0)
+            {
+                if (keys[slot] == key)
+                {
+                    exists = true;
+                    break;
+                }
+
+                slot = (slot + 1) & (capacity - 1);
+            }
+
+            if (!exists)
+            {
+                keys[slot] = key;
+                values[slot] = 1;
+                entry->edges[entry->edge_count * 2 + 0] = a;
+                entry->edges[entry->edge_count * 2 + 1] = b;
+                entry->edge_count++;
+            }
+        }
+    }
+
+    SDL_free(keys);
+    SDL_free(values);
+    SDL_free(point_of_vertex);
+
+    entry->key = data->vertices;
+    entry->index_count = data->index_count;
+    return entry;
+}
+
+// A line of a 2D view, unless it can't be seen : outside the view, or shorter than a pixel.
+static void add_line_2d(ImDrawList* draw_list, ImVec2 a, ImVec2 b, ImU32 color)
+{
+    if ((a.x < view_clip_lo.x && b.x < view_clip_lo.x) || (a.x > view_clip_hi.x && b.x > view_clip_hi.x) ||
+        (a.y < view_clip_lo.y && b.y < view_clip_lo.y) || (a.y > view_clip_hi.y && b.y > view_clip_hi.y))
+    {
+        return;
+    }
+
+    if (SDL_fabsf(a.x - b.x) < 1.0f && SDL_fabsf(a.y - b.y) < 1.0f)
+    {
+        return;
+    }
+
+    draw_list->AddLine(a, b, color);
+}
+
 static void draw_object_2d(ImDrawList* draw_list, const OrthoView* view, ImVec2 center, const SceneObject* object, ImU32 color)
 {
     Mat4 matrix = scene_object_matrix(object);
@@ -2814,7 +3005,7 @@ static void draw_object_2d(ImDrawList* draw_list, const OrthoView* view, ImVec2 
         {
             ImVec2 a = to_screen(view, center, transform_point(matrix, to_vec3(edit_mesh_position(mesh, mesh->edges[e].a))));
             ImVec2 b = to_screen(view, center, transform_point(matrix, to_vec3(edit_mesh_position(mesh, mesh->edges[e].b))));
-            draw_list->AddLine(a, b, color);
+            add_line_2d(draw_list, a, b, color);
         }
 
         return;
@@ -2822,23 +3013,33 @@ static void draw_object_2d(ImDrawList* draw_list, const OrthoView* view, ImVec2 
 
     const LoadedModel* model = object->model[0] ? asset_get_model(object->model) : NULL;
 
-    if (model && model->data.index_count <= 9000)
+    if (model && model->data.index_count > 0 && model->data.index_count <= MODEL_EDGE_MAX_INDICES)
     {
-        const ModelData* data = &model->data;
+        // Nothing to do when the whole model is outside the view.
+        ImVec2 r_lo;
+        ImVec2 r_hi;
+        object_rect_2d(view, center, object, &r_lo, &r_hi);
 
-        for (int t = 0; t + 2 < data->index_count; t += 3)
+        if (r_hi.x < view_clip_lo.x || r_lo.x > view_clip_hi.x || r_hi.y < view_clip_lo.y || r_lo.y > view_clip_hi.y)
         {
-            ImVec2 p[3];
-
-            for (int k = 0; k < 3; k++)
-            {
-                const MeshVertex* vertex = &data->vertices[data->indices[t + k]];
-                p[k] = to_screen(view, center, transform_point(matrix, vec3(vertex->x, vertex->y, vertex->z)));
-            }
-
-            draw_list->AddTriangle(p[0], p[1], p[2], color);
+            return;
         }
 
+        const ModelEdges* edges = get_model_edges(&model->data);
+        ImVec2* projected = (ImVec2*)SDL_malloc(sizeof(ImVec2) * (size_t)SDL_max(1, edges->point_count));
+
+        for (int p = 0; p < edges->point_count; p++)
+        {
+            const float* point = &edges->points[p * 3];
+            projected[p] = to_screen(view, center, transform_point(matrix, vec3(point[0], point[1], point[2])));
+        }
+
+        for (int e = 0; e < edges->edge_count; e++)
+        {
+            add_line_2d(draw_list, projected[edges->edges[e * 2]], projected[edges->edges[e * 2 + 1]], color);
+        }
+
+        SDL_free(projected);
         return;
     }
 
@@ -2858,7 +3059,7 @@ static void draw_object_2d(ImDrawList* draw_list, const OrthoView* view, ImVec2 
 
         for (int e = 0; e < 12; e++)
         {
-            draw_list->AddLine(corners[edges[e][0]], corners[edges[e][1]], color);
+            add_line_2d(draw_list, corners[edges[e][0]], corners[edges[e][1]], color);
         }
 
         return;
@@ -3440,6 +3641,8 @@ static void draw_view(int index, ImVec2 lo, ImVec2 hi)
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     ImVec2 center((lo.x + hi.x) * 0.5f, (lo.y + hi.y) * 0.5f);
 
+    view_clip_lo = lo;
+    view_clip_hi = hi;
     draw_list->PushClipRect(lo, hi, true);
     draw_list->AddRectFilled(lo, hi, IM_COL32(26, 26, 28, 255));
     draw_view_grid(draw_list, view, lo, hi, center);
@@ -3619,17 +3822,47 @@ void editor_draw_2d_views(void)
     available.x = SDL_max(available.x, 50.0f);
     available.y = SDL_max(available.y, 50.0f);
 
-    int count = views_shown == 3 ? 3 : 1;
-    bool stacked = available.y >= available.x * 0.8f;
+    // Where each view goes. All three : the top view on the left half, front and side stacked on the
+    // right (each keeps a usable shape) ; one row or one column only when the panel is very elongated.
     const float gap = 4.0f;
+    int count = views_shown == 3 ? 3 : 1;
+    ImVec2 los[3];
+    ImVec2 his[3];
+
+    if (count == 1)
+    {
+        los[0] = origin;
+        his[0] = ImVec2(origin.x + available.x, origin.y + available.y);
+    }
+    else if (available.x > available.y * 2.6f || available.y > available.x * 2.6f)
+    {
+        bool in_row = available.x > available.y;
+        float step = ((in_row ? available.x : available.y) - gap * 2.0f) / 3.0f;
+
+        for (int k = 0; k < 3; k++)
+        {
+            los[k] = in_row ? ImVec2(origin.x + (step + gap) * (float)k, origin.y) : ImVec2(origin.x, origin.y + (step + gap) * (float)k);
+            his[k] = in_row ? ImVec2(los[k].x + step, origin.y + available.y) : ImVec2(origin.x + available.x, los[k].y + step);
+        }
+    }
+    else
+    {
+        float half_width = (available.x - gap) * 0.5f;
+        float half_height = (available.y - gap) * 0.5f;
+        los[0] = origin;
+        his[0] = ImVec2(origin.x + half_width, origin.y + available.y);
+        los[1] = ImVec2(origin.x + half_width + gap, origin.y);
+        his[1] = ImVec2(origin.x + available.x, origin.y + half_height);
+        los[2] = ImVec2(origin.x + half_width + gap, origin.y + half_height + gap);
+        his[2] = ImVec2(origin.x + available.x, origin.y + available.y);
+    }
 
     for (int k = 0; k < count; k++)
     {
         int index = views_shown == 3 ? k : views_shown;
-        ImVec2 size = stacked ? ImVec2(available.x, (available.y - gap * (float)(count - 1)) / (float)count) :
-            ImVec2((available.x - gap * (float)(count - 1)) / (float)count, available.y);
-        ImVec2 lo = stacked ? ImVec2(origin.x, origin.y + (size.y + gap) * (float)k) : ImVec2(origin.x + (size.x + gap) * (float)k, origin.y);
-        ImVec2 hi(lo.x + size.x, lo.y + size.y);
+        ImVec2 lo = los[k];
+        ImVec2 hi = his[k];
+        ImVec2 size(hi.x - lo.x, hi.y - lo.y);
 
         ImGui::SetCursorScreenPos(lo);
         ImGui::PushID(index);

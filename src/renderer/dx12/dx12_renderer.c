@@ -27,7 +27,9 @@
 void dx12_wait_renderer_idle(void);
 
 #define FRAME_COUNT 2
-#define VERTEX_BUFFER_SIZE (4 * 1024 * 1024)
+static int vertex_buffer_full_reported; // the overflow message was printed this frame
+
+#define VERTEX_BUFFER_SIZE (8 * 1024 * 1024) // per frame in flight : 262144 vertices
 #define MAX_TEXTURES 8192 // the shader-visible heap : textures and buffers alike (the bindless table, see gpu.h)
 #define GPU_FRAME_BUFFER_SIZE (8 * 1024 * 1024)
 #define SHADER_READ_STATE (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
@@ -1319,6 +1321,7 @@ static int record_commands(void)
     ID3D12GraphicsCommandList_ClearRenderTargetView(command_list, rtv_handle, clear_color, 0, NULL);
 
     vertex_write_offset = 0;
+    vertex_buffer_full_reported = 0;
 
     return 1;
 }
@@ -1865,7 +1868,13 @@ void dx12_draw_vertices(const Vertex* vertices, int vertex_count, Texture* textu
 
     if (*write_offset + (UINT)vertex_count > VERTEX_BUFFER_SIZE / sizeof(Vertex))
     {
-        printf("Direct3D 12 vertex buffer is full this frame, dropping a draw call.\n");
+        // Once per frame : a full buffer usually drops many draws in a row.
+        if (!vertex_buffer_full_reported)
+        {
+            printf("Direct3D 12 vertex buffer is full this frame : draw calls are dropped.\n");
+            vertex_buffer_full_reported = 1;
+        }
+
         return;
     }
 

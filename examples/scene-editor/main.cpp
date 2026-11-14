@@ -2344,6 +2344,7 @@ static void shutdown_example(void)
     forward_shadow_map = NULL;
 
     audio_shutdown();
+    level_editor_free_caches();
     asset_database_close();
 }
 

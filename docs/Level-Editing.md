@@ -72,7 +72,13 @@ The pieces are capped. Keeping both sides creates a "(cut)" object.
 ## 2D views
 
 Three orthographic wireframe views: top (X/Z), front (X/Y) and side (Z/Y). They open from the View
-menu or the Tools panel.
+menu or the Tools panel. The panel shows one view, or all three ("All"):
+
+- usually, the top view fills the left half, with the front and side views stacked on the right;
+- in a very wide or very tall panel, the three views sit in a row or in a column.
+
+Model wireframes are drawn from each model's unique edges, built once and cached. Edges outside a
+view, or shorter than a pixel, are skipped, so dense models stay cheap to draw.
 
 - **Editing**: select, move (Shift to extrude or clone), draw blocks and clip lines.
 - **Picking**: a click picks stacked vertices and edges, as in Hammer.

@@ -139,6 +139,7 @@ extern int editor_clip_mode;
 
 void level_editor_init(void);
 void level_editor_reset(void);     // a scene was loaded : nothing in progress
+void level_editor_free_caches(void); // at shutdown : what the 2D views cached about models
 const char* level_selection_mode_name(int mode);
 void level_set_selection_mode(int mode);
 void level_set_tool(int tool);

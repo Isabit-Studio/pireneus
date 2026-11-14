@@ -17,7 +17,9 @@
 #include "debug.h"
 
 #define MAX_FRAMES_IN_FLIGHT 2
-#define VERTEX_BUFFER_SIZE (4 * 1024 * 1024)
+static int vertex_buffer_full_reported; // the overflow message was printed this frame
+
+#define VERTEX_BUFFER_SIZE (8 * 1024 * 1024) // per frame in flight : 262144 vertices
 #define MAX_TEXTURES 4096
 #define BINDLESS_CAPACITY 8192
 #define GPU_FRAME_BUFFER_SIZE (8 * 1024 * 1024)
@@ -2640,6 +2642,7 @@ int vulkan_begin_frame(void)
     vkBeginCommandBuffer(current_command_buffer, &begin_info);
 
     vertex_write_offset = 0;
+    vertex_buffer_full_reported = 0;
     gpu_frame_offset = 0;
     window_pass_active = 0;
     frame_recording = 1;
@@ -2711,7 +2714,13 @@ void vulkan_draw_vertices(const Vertex* vertices, int vertex_count, Texture* tex
 
     if (*write_offset + (uint32_t)vertex_count > VERTEX_BUFFER_SIZE / sizeof(Vertex))
     {
-        printf("Vulkan vertex buffer is full this frame, dropping a draw call.\n");
+        // Once per frame : a full buffer usually drops many draws in a row.
+        if (!vertex_buffer_full_reported)
+        {
+            printf("Vulkan vertex buffer is full this frame : draw calls are dropped.\n");
+            vertex_buffer_full_reported = 1;
+        }
+
         return;
     }
 
