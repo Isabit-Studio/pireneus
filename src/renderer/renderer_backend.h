@@ -65,6 +65,9 @@ typedef struct
     void (*gpu_draw_indexed)(Mesh*, int, int);
     int (*gpu_raytracing_supported)(void);
     uint32_t (*gpu_build_ray_scene)(const GpuRayInstance*, int);
+
+    // Statistics : fills only what the backend knows (backend, gpu_name, gpu_frame_ms, vram_*).
+    void (*get_stats)(RendererStats*);
 } RendererBackend;
 
 #endif // _RENDERER_BACKEND_H_

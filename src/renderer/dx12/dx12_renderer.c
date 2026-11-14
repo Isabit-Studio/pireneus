@@ -169,6 +169,17 @@ static HANDLE fence_event;
 
 static UINT frame_index;
 
+// Statistics (renderer_get_stats) : the adapter's name and video memory (DXGI), and the GPU time of each
+// frame's command list from two timestamps, resolved into a readback buffer and read when that back
+// buffer's slot comes round again (move_to_next_frame() has waited for it by then).
+static char gpu_name[128];
+static IDXGIAdapter3* stats_adapter;       // NULL if the adapter doesn't expose IDXGIAdapter3
+static ID3D12QueryHeap* timestamp_heap;    // two timestamps per frame ; NULL if unavailable
+static ID3D12Resource* timestamp_readback;
+static UINT64 timestamp_frequency;
+static int timestamp_pending[FRAME_COUNT];
+static float last_gpu_frame_ms = -1.0f;
+
 static Texture built_in_white_texture;
 
 // --- Bindless GPU layer (see gpu.h) ---
@@ -248,6 +259,13 @@ static int create_device(void)
             SUCCEEDED(D3D12CreateDevice((IUnknown*)adapter, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device, (void**)&device)))
         {
             chosen_adapter_desc = desc;
+            WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, gpu_name, (int)sizeof(gpu_name), NULL, NULL);
+
+            if (FAILED(IDXGIAdapter1_QueryInterface(adapter, &IID_IDXGIAdapter3, (void**)&stats_adapter)))
+            {
+                stats_adapter = NULL;
+            }
+
             IDXGIAdapter1_Release(adapter);
             adapter = NULL;
             break;
@@ -1267,6 +1285,57 @@ static int create_white_texture(void)
     return upload_texture_pixels(&built_in_white_texture, pixel, 1, 1);
 }
 
+// Optional : without them, the GPU time is reported as unknown.
+static void create_timestamp_queries(void)
+{
+    if (FAILED(ID3D12CommandQueue_GetTimestampFrequency(command_queue, &timestamp_frequency)) || timestamp_frequency == 0)
+    {
+        return;
+    }
+
+    D3D12_QUERY_HEAP_DESC heap_desc = { .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = 2 * FRAME_COUNT };
+
+    if (FAILED(ID3D12Device_CreateQueryHeap(device, &heap_desc, &IID_ID3D12QueryHeap, (void**)&timestamp_heap)))
+    {
+        timestamp_heap = NULL;
+        return;
+    }
+
+    D3D12_HEAP_PROPERTIES heap_properties = { .Type = D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC buffer_desc = {
+        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Width = sizeof(UINT64) * 2 * FRAME_COUNT,
+        .Height = 1,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .SampleDesc = { 1, 0 },
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR
+    };
+
+    if (FAILED(ID3D12Device_CreateCommittedResource(device, &heap_properties, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+        D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&timestamp_readback)))
+    {
+        ID3D12QueryHeap_Release(timestamp_heap);
+        timestamp_heap = NULL;
+        timestamp_readback = NULL;
+    }
+}
+
+static void dx12_get_stats(RendererStats* stats)
+{
+    stats->backend = "DirectX 12";
+    SDL_strlcpy(stats->gpu_name, gpu_name, sizeof(stats->gpu_name));
+    stats->gpu_frame_ms = last_gpu_frame_ms;
+
+    DXGI_QUERY_VIDEO_MEMORY_INFO memory;
+
+    if (stats_adapter && SUCCEEDED(IDXGIAdapter3_QueryVideoMemoryInfo(stats_adapter, 0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &memory)))
+    {
+        stats->vram_used = memory.CurrentUsage;
+        stats->vram_budget = memory.Budget;
+    }
+}
+
 static int record_commands(void)
 {
     if (FAILED(ID3D12CommandAllocator_Reset(command_allocators[frame_index])))
@@ -1281,6 +1350,27 @@ static int record_commands(void)
 
     active_command_list = command_list;
     gpu_frame_offset = 0;
+
+    if (timestamp_heap)
+    {
+        if (timestamp_pending[frame_index])
+        {
+            D3D12_RANGE range = { sizeof(UINT64) * 2 * frame_index, sizeof(UINT64) * 2 * (frame_index + 1) };
+            void* mapped = NULL;
+
+            if (SUCCEEDED(ID3D12Resource_Map(timestamp_readback, 0, &range, &mapped)))
+            {
+                const UINT64* times = (const UINT64*)mapped + 2 * frame_index;
+                last_gpu_frame_ms = (float)((double)(times[1] - times[0]) * 1000.0 / (double)timestamp_frequency);
+                D3D12_RANGE nothing_written = { 0, 0 };
+                ID3D12Resource_Unmap(timestamp_readback, 0, &nothing_written);
+            }
+
+            timestamp_pending[frame_index] = 0;
+        }
+
+        ID3D12GraphicsCommandList_EndQuery(command_list, timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, frame_index * 2);
+    }
 
     ID3D12DescriptorHeap* heaps[] = { srv_heap };
     ID3D12GraphicsCommandList_SetDescriptorHeaps(command_list, 1, heaps);
@@ -1574,6 +1664,7 @@ int dx12_create_renderer(Window* target_window)
     }
 
     create_ray_tracing_resources();
+    create_timestamp_queries();
 
     DEBUG_LOG("[dx12] renderer ready (swapchain %ux%u)\n", swapchain_width, swapchain_height);
 
@@ -1911,6 +2002,14 @@ void dx12_end_frame(void)
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     ID3D12GraphicsCommandList_ResourceBarrier(command_list, 1, &barrier);
 
+    if (timestamp_heap)
+    {
+        ID3D12GraphicsCommandList_EndQuery(command_list, timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, frame_index * 2 + 1);
+        ID3D12GraphicsCommandList_ResolveQueryData(command_list, timestamp_heap, D3D12_QUERY_TYPE_TIMESTAMP, frame_index * 2, 2,
+            timestamp_readback, sizeof(UINT64) * 2 * frame_index);
+        timestamp_pending[frame_index] = 1;
+    }
+
     if (FAILED(ID3D12GraphicsCommandList_Close(command_list)))
     {
         return;
@@ -1953,6 +2052,24 @@ void dx12_destroy_renderer(void)
     dx12_wait_renderer_idle();
 
     ID3D12Resource_Release(built_in_white_texture.resource);
+
+    if (timestamp_readback)
+    {
+        ID3D12Resource_Release(timestamp_readback);
+        timestamp_readback = NULL;
+    }
+
+    if (timestamp_heap)
+    {
+        ID3D12QueryHeap_Release(timestamp_heap);
+        timestamp_heap = NULL;
+    }
+
+    if (stats_adapter)
+    {
+        IDXGIAdapter3_Release(stats_adapter);
+        stats_adapter = NULL;
+    }
 
     if (fence_event)
     {
@@ -3139,6 +3256,7 @@ static const RendererBackend dx12_backend = {
     .create_renderer = dx12_create_renderer,
     .destroy_renderer = dx12_destroy_renderer,
     .wait_renderer_idle = dx12_wait_renderer_idle,
+    .get_stats = dx12_get_stats,
     .begin_frame = dx12_begin_frame,
     .end_frame = dx12_end_frame,
     .create_texture = dx12_create_texture,

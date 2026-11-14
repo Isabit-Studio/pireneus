@@ -2190,6 +2190,7 @@ const CameraMatrices* editor_camera(void)
 
 static void update(void)
 {
+    profiler_frame_begin();
     frame_number++;
     edit_mesh_gpu_end_frame();
 
@@ -2230,6 +2231,7 @@ static void update(void)
     editor_draw_asset_browser();
     editor_draw_2d_views();
     editor_draw_project_settings();
+    profiler_draw();
     handle_shortcuts();
 
     // Matrices again : the camera may have moved while handling this frame's input.
@@ -2237,10 +2239,13 @@ static void update(void)
 
     prepare_rendering();
     collect_meshes();
+    profiler_update_end();
 }
 
 static void render(void)
 {
+    profiler_render_begin();
+
     int width = 0;
     int height = 0;
     get_window_size(&width, &height);
@@ -2255,6 +2260,7 @@ static void render(void)
     }
 
     render_sprites(width, height);
+    profiler_render_end();
 }
 
 static int init(void)

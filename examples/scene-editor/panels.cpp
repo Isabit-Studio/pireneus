@@ -194,6 +194,12 @@ void editor_draw_main_menu(void)
             ImGui::EndMenu();
         }
 
+        if (ImGui::BeginMenu("Profiler"))
+        {
+            profiler_draw_menu();
+            ImGui::EndMenu();
+        }
+
         // Play controls, centered in the bar.
         float buttons_width = 150.0f;
         ImGui::SetCursorPosX((ImGui::GetWindowWidth() - buttons_width) * 0.5f);

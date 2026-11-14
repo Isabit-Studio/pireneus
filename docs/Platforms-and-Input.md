@@ -59,6 +59,17 @@ to.
 
 On UWP, these are the app's own folders (`LocalState`).
 
+## Process statistics (`platforms_system.h`)
+
+`platform_process_stats()` reads the process' resident and committed memory, and the CPU time it has
+used, straight from the operating system:
+
+- Windows and UWP: `GetProcessMemoryInfo` and `GetProcessTimes`;
+- Linux: `/proc/self/statm` and `getrusage`;
+- macOS: `task_info` and `getrusage`.
+
+The editor's profiler uses it. The Linux and macOS paths are written but not tested yet.
+
 ## Resizing
 
 Fast interactive resizing used to crash the DX12 backend. Several safeguards are in place:

@@ -12,6 +12,7 @@ add_executable(pireneus-examples
     scene-editor/panels.cpp
     scene-editor/asset_browser.cpp
     scene-editor/level_editor.cpp
+    scene-editor/profiler.cpp
 )
 target_include_directories(pireneus-examples PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pireneus-examples PRIVATE pireneus_imgui imguizmo)

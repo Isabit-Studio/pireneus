@@ -2,7 +2,7 @@
 #define _EDITOR_H_
 
 // State shared by the editor's source files : main.cpp (scene, camera, viewport, play mode), panels.cpp
-// (menus and panels), asset_browser.cpp, and level_editor.cpp (Hammer-style level editing).
+// (menus and panels), asset_browser.cpp, level_editor.cpp (Hammer-style level editing) and profiler.cpp.
 
 #include <stdio.h>
 
@@ -177,6 +177,17 @@ void editor_draw_inspector(void);
 void editor_draw_view_panel(void);
 void editor_draw_project_settings(void);
 void editor_draw_asset_browser(void);
+
+// --- Profiler (profiler.cpp) ---
+extern bool profiler_show_fps;      // the simple FPS counter, in a corner of the 3D view
+extern bool profiler_show_details;  // the detailed statistics panel
+
+void profiler_frame_begin(void);    // first thing in update() : closes the previous frame's numbers
+void profiler_update_end(void);     // last thing in update()
+void profiler_render_begin(void);   // around render()
+void profiler_render_end(void);
+void profiler_draw_menu(void);      // the items of the menu bar's "Profiler" menu
+void profiler_draw(void);           // its windows, during update()
 
 void editor_asset_browser_init(void);
 void editor_asset_browser_shutdown(void);

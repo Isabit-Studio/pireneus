@@ -110,4 +110,21 @@ The photorealistic renderer doesn't use `draw_vertices`. It uses `gpu.h`, a *bin
 - on Vulkan: Vulkan 1.3, with dynamic rendering and descriptor indexing;
 - on DX12: resource binding tier 2.
 
+## Statistics
+
+`renderer_get_stats()` fills a `RendererStats` for profilers:
+
+| Field | Meaning |
+| --- | --- |
+| `backend`, `gpu_name` | The backend in use and the GPU's name |
+| `gpu_frame_ms` | GPU time of the last measured frame's command list, from timestamp queries; < 0 if unavailable |
+| `vram_used`, `vram_budget` | Video memory used by the process and its budget, in bytes; 0 if unknown |
+| `draw_calls`, `mesh_draws`, `vertices_2d` | Counts for the last frame |
+
+- **Draw counts** cover everything between two `end_frame()` calls, including the synchronous passes.
+- **GPU time** is measured around the frame's command list only, and arrives a frame or two late,
+  since the GPU runs behind the CPU.
+- **Backends** provide their part through `RendererBackend::get_stats`: timestamp queries (a
+  `VkQueryPool` or an `ID3D12QueryHeap`) and DXGI or VMA memory budgets.
+
 Next: [Photorealistic rendering and path tracing](Photorealistic-Rendering).

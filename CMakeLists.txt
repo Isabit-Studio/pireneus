@@ -50,6 +50,7 @@ add_library(pireneus STATIC
     src/model/model.c
     src/meshedit/edit_mesh.c
     src/meshedit/edit_mesh_gpu.c
+    src/platforms/platforms_system.c
 )
 
 target_include_directories(pireneus PUBLIC ${PIRENEUS_THIRDPARTIES_INCLUDES} src)

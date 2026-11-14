@@ -135,6 +135,26 @@ void draw_skybox(Texture* equirectangular, float intensity);
 // (sprite_batch) must be flushed before changing it, since it only affects draws issued afterwards.
 void set_scissor(int x, int y, int width, int height);
 
+// --- Statistics (profiling) -------------------------------------------------------------------
+//
+// What the renderer knows about the last frames, for profilers. The counts cover everything drawn
+// between two end_frame() calls, synchronous passes (shadow maps, render targets) included. The GPU
+// time is measured with timestamp queries around the frame's command list only (not the synchronous
+// passes), a frame or two late, since the GPU runs behind the CPU.
+typedef struct
+{
+    const char* backend;        // "Vulkan", "DirectX 12"
+    char gpu_name[128];
+    float gpu_frame_ms;         // GPU time of the frame's command list ; < 0 if it can't be measured
+    unsigned long long vram_used;   // bytes of video memory this process uses ; 0 if unknown
+    unsigned long long vram_budget; // bytes the OS lets it use before trouble ; 0 if unknown
+    int draw_calls;             // every draw of the last frame : 2D batches, meshes, sky, GPU layer
+    int vertices_2d;            // vertices sent through draw_vertices() (sprites, UI)
+    int mesh_draws;             // draw_mesh*() calls
+} RendererStats;
+
+void renderer_get_stats(RendererStats* out_stats);
+
 #ifdef __cplusplus
 }
 #endif

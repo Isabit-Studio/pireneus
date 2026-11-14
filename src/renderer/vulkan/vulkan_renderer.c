@@ -19,6 +19,17 @@
 #define MAX_FRAMES_IN_FLIGHT 2
 static int vertex_buffer_full_reported; // the overflow message was printed this frame
 
+// Statistics (renderer_get_stats) : the GPU's name, the GPU time of each frame's command buffer from
+// two timestamps (read back when its slot comes round again, the fence having been waited on), and
+// video memory from VMA's budgets (exact with VK_EXT_memory_budget, VMA's own allocations otherwise).
+static char gpu_name[128];
+static VkQueryPool timestamp_pool;   // two queries per frame in flight ; VK_NULL_HANDLE if unsupported
+static float timestamp_period_ns;
+static uint64_t timestamp_mask;
+static int timestamp_pending[MAX_FRAMES_IN_FLIGHT];
+static float last_gpu_frame_ms = -1.0f;
+static int memory_budget_enabled;
+
 #define VERTEX_BUFFER_SIZE (8 * 1024 * 1024) // per frame in flight : 262144 vertices
 #define MAX_TEXTURES 4096
 #define BINDLESS_CAPACITY 8192
@@ -409,6 +420,7 @@ static int pick_physical_device(void)
 
     VkPhysicalDeviceProperties chosen_properties;
     vkGetPhysicalDeviceProperties(physical_device, &chosen_properties);
+    SDL_strlcpy(gpu_name, chosen_properties.deviceName, sizeof(gpu_name));
     DEBUG_LOG("[vulkan] using device: %s\n", chosen_properties.deviceName);
 
     return 1;
@@ -542,6 +554,26 @@ static int create_logical_device(void)
         .features = { .geometryShader = VK_TRUE, .samplerAnisotropy = VK_TRUE }
     };
 
+    // Video memory usage and budget for the profiler (VMA reads them through this extension).
+    memory_budget_enabled = 0;
+    {
+        uint32_t extension_count = 0;
+        vkEnumerateDeviceExtensionProperties(physical_device, NULL, &extension_count, NULL);
+        VkExtensionProperties* extensions = SDL_malloc(sizeof(VkExtensionProperties) * SDL_max(1, extension_count));
+        vkEnumerateDeviceExtensionProperties(physical_device, NULL, &extension_count, extensions);
+
+        for (uint32_t i = 0; i < extension_count; i++)
+        {
+            if (SDL_strcmp(extensions[i].extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0)
+            {
+                memory_budget_enabled = 1;
+                device_extensions[device_extension_count++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+            }
+        }
+
+        SDL_free(extensions);
+    }
+
     VkDeviceCreateInfo device_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
         .pNext = gpu_available ? &enable2 : NULL,
@@ -578,7 +610,8 @@ static int create_logical_device(void)
 static int create_allocator(void)
 {
     VmaAllocatorCreateInfo allocator_create_info = {
-        .flags = rt_available ? VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT : 0,
+        .flags = (rt_available ? VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT : 0) |
+            (memory_budget_enabled ? VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT : 0),
         .physicalDevice = physical_device,
         .device = device,
         .instance = instance,
@@ -602,6 +635,66 @@ static int create_allocator(void)
     }
 
     return 1;
+}
+
+// Optional : without timestamps on the graphics queue, the GPU time is reported as unknown.
+static void create_timestamp_queries(void)
+{
+    VkPhysicalDeviceProperties properties;
+    vkGetPhysicalDeviceProperties(physical_device, &properties);
+
+    uint32_t family_count = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, NULL);
+    VkQueueFamilyProperties* families = SDL_malloc(sizeof(VkQueueFamilyProperties) * SDL_max(1, family_count));
+    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &family_count, families);
+    uint32_t valid_bits = families[queue_family_indices.graphics_family].timestampValidBits;
+    SDL_free(families);
+
+    if (valid_bits == 0 || properties.limits.timestampPeriod <= 0.0f)
+    {
+        return;
+    }
+
+    VkQueryPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+        .queryType = VK_QUERY_TYPE_TIMESTAMP,
+        .queryCount = 2 * MAX_FRAMES_IN_FLIGHT
+    };
+
+    if (vkCreateQueryPool(device, &pool_info, NULL, &timestamp_pool) != VK_SUCCESS)
+    {
+        timestamp_pool = VK_NULL_HANDLE;
+        return;
+    }
+
+    timestamp_period_ns = properties.limits.timestampPeriod;
+    timestamp_mask = valid_bits >= 64 ? ~0ull : ((1ull << valid_bits) - 1ull);
+}
+
+static void vulkan_get_stats(RendererStats* stats)
+{
+    stats->backend = "Vulkan";
+    SDL_strlcpy(stats->gpu_name, gpu_name, sizeof(stats->gpu_name));
+    stats->gpu_frame_ms = last_gpu_frame_ms;
+
+    if (!allocator)
+    {
+        return;
+    }
+
+    const VkPhysicalDeviceMemoryProperties* memory = NULL;
+    vmaGetMemoryProperties(allocator, &memory);
+    VmaBudget budgets[VK_MAX_MEMORY_HEAPS];
+    vmaGetHeapBudgets(allocator, budgets);
+
+    for (uint32_t i = 0; i < memory->memoryHeapCount; i++)
+    {
+        if (memory->memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+        {
+            stats->vram_used += budgets[i].usage;
+            stats->vram_budget += budgets[i].budget;
+        }
+    }
 }
 
 static VkSurfaceFormatKHR choose_surface_format(const VkSurfaceFormatKHR* formats, uint32_t count)
@@ -2215,6 +2308,8 @@ int vulkan_create_renderer(Window* target_window)
         return 0;
     }
 
+    create_timestamp_queries();
+
     if (!create_swapchain())
     {
         return 0;
@@ -2641,6 +2736,28 @@ int vulkan_begin_frame(void)
     VkCommandBufferBeginInfo begin_info = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(current_command_buffer, &begin_info);
 
+    if (timestamp_pool)
+    {
+        // This slot's last frame is done (its fence was waited on above) : its two timestamps are there.
+        uint32_t first = (uint32_t)current_frame * 2;
+
+        if (timestamp_pending[current_frame])
+        {
+            uint64_t times[2];
+
+            if (vkGetQueryPoolResults(device, timestamp_pool, first, 2, sizeof(times), times, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+            {
+                uint64_t ticks = (times[1] - times[0]) & timestamp_mask;
+                last_gpu_frame_ms = (float)((double)ticks * (double)timestamp_period_ns * 1e-6);
+            }
+
+            timestamp_pending[current_frame] = 0;
+        }
+
+        vkCmdResetQueryPool(current_command_buffer, timestamp_pool, first, 2);
+        vkCmdWriteTimestamp(current_command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_pool, first);
+    }
+
     vertex_write_offset = 0;
     vertex_buffer_full_reported = 0;
     gpu_frame_offset = 0;
@@ -2750,6 +2867,13 @@ void vulkan_end_frame(void)
 {
     ensure_window_pass(); // nothing drawn this frame : the pass still clears and presents the image
     vkCmdEndRenderPass(current_command_buffer);
+
+    if (timestamp_pool)
+    {
+        vkCmdWriteTimestamp(current_command_buffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_pool, (uint32_t)current_frame * 2 + 1);
+        timestamp_pending[current_frame] = 1;
+    }
+
     vkEndCommandBuffer(current_command_buffer);
 
     window_pass_active = 0;
@@ -2823,6 +2947,12 @@ void vulkan_destroy_renderer(void)
     }
 
     destroy_mapped_buffer(&render_target_vertex_buffer);
+
+    if (timestamp_pool)
+    {
+        vkDestroyQueryPool(device, timestamp_pool, NULL);
+        timestamp_pool = VK_NULL_HANDLE;
+    }
 
     vkDestroyCommandPool(device, command_pool, NULL);
 
@@ -3875,6 +4005,7 @@ static const RendererBackend vulkan_backend = {
     .create_renderer = vulkan_create_renderer,
     .destroy_renderer = vulkan_destroy_renderer,
     .wait_renderer_idle = vulkan_wait_renderer_idle,
+    .get_stats = vulkan_get_stats,
     .begin_frame = vulkan_begin_frame,
     .end_frame = vulkan_end_frame,
     .create_texture = vulkan_create_texture,

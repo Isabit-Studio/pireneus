@@ -17,6 +17,17 @@
 
 static const RendererBackend* backend;
 
+// Draw counts : `counting` accumulates until end_frame(), which publishes it as `counted`.
+typedef struct
+{
+    int draw_calls;
+    int vertices_2d;
+    int mesh_draws;
+} DrawCounts;
+
+static DrawCounts counting;
+static DrawCounts counted;
+
 #if defined(_WIN32) && !defined(PIRENEUS_UWP)
 // Only asked on Windows, the one platform where there's an actual choice to make (DX12 isn't
 // compiled anywhere else, see renderer_backend.h/dx12_renderer.h). Uses a native SDL message box
@@ -131,6 +142,23 @@ int begin_frame(void)
 void end_frame(void)
 {
     backend->end_frame();
+    counted = counting;
+    SDL_zero(counting);
+}
+
+void renderer_get_stats(RendererStats* out_stats)
+{
+    SDL_zerop(out_stats);
+    out_stats->gpu_frame_ms = -1.0f;
+
+    if (backend)
+    {
+        backend->get_stats(out_stats);
+    }
+
+    out_stats->draw_calls = counted.draw_calls;
+    out_stats->vertices_2d = counted.vertices_2d;
+    out_stats->mesh_draws = counted.mesh_draws;
 }
 
 Texture* create_texture(const char* file_path, int* out_width, int* out_height)
@@ -190,6 +218,8 @@ void end_render_target_pass(void)
 
 void draw_vertices(const Vertex* vertices, int vertex_count, Texture* texture)
 {
+    counting.draw_calls++;
+    counting.vertices_2d += vertex_count;
     backend->draw_vertices(vertices, vertex_count, texture);
 }
 
@@ -267,6 +297,8 @@ static void draw_mesh_with(Mesh* mesh, const float model[16], float r, float g, 
         packed[14] = b;
         packed[15] = vertex_colors;
 
+        counting.draw_calls++;
+        counting.mesh_draws++;
         backend->draw_mesh(mesh, packed, first_index, index_count);
     }
 }
@@ -293,6 +325,7 @@ void draw_skybox(Texture* equirectangular, float intensity)
 {
     if (equirectangular)
     {
+        counting.draw_calls++;
         backend->draw_skybox(equirectangular, intensity);
     }
 }
@@ -385,6 +418,7 @@ void gpu_push_constants(const void* data, int size)
 
 void gpu_draw(int vertex_count)
 {
+    counting.draw_calls++;
     backend->gpu_draw(vertex_count);
 }
 
@@ -402,6 +436,7 @@ void gpu_draw_indexed(Mesh* mesh, int first_index, int index_count)
 {
     if (mesh && index_count > 0)
     {
+        counting.draw_calls++;
         backend->gpu_draw_indexed(mesh, first_index, index_count);
     }
 }
