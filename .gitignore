@@ -94,6 +94,7 @@ Temporary Items
 
 bin/
 build/
+build-uwp/
 .task/
 .task/checksum/
 .vscode/
@@ -105,8 +106,11 @@ project.profile.ps1
 .ctest-cache.json
 ctr
 *.lock
-tools/
-assets/
+/tools/
+/assets/
+
+# Blender's automatic backups
+*.blend1
 
 ### CMake ###
 CMakeLists.txt.user
