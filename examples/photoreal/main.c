@@ -4,7 +4,6 @@
 
 #include <SDL3/SDL.h>
 
-#include "platforms/platforms_input.h"
 #include "platforms/platforms_window.h"
 #include "renderer/renderer.h"
 #include "renderer/photoreal/photoreal.h"
@@ -25,33 +24,6 @@ static Vec3 scene_center;
 static float scene_radius;
 static Uint64 start_ticks;
 
-static int path_tracing;
-
-// Space toggles the path tracer, on GPUs that have ray tracing. The orbit stops meanwhile, so it converges.
-static void update(void)
-{
-    static int space_was_down;
-    int space_down = input_is_key_down(SCANCODE_SPACE);
-
-    if (space_down && !space_was_down && photoreal_path_tracing_supported())
-    {
-        path_tracing = !path_tracing;
-
-        PhotorealQuality quality;
-        PhotorealLook look;
-        photoreal_default_quality(&quality);
-        photoreal_default_look(&look);
-        quality.path_tracing = path_tracing;
-        photoreal_set_settings(&quality, &look);
-
-        char title[96];
-        SDL_snprintf(title, sizeof(title), "Photorealistic Rendering - %s", path_tracing ? "path tracing" : "real time (Space : path tracing)");
-        set_window_title(title);
-    }
-
-    space_was_down = space_down;
-}
-
 static void render(void)
 {
     int width = 0;
@@ -66,10 +38,7 @@ static void render(void)
     static float orbit_time;
     Uint64 now = SDL_GetTicks();
 
-    if (!path_tracing)
-    {
-        orbit_time += (float)(now - start_ticks) / 1000.0f;
-    }
+    orbit_time += (float)(now - start_ticks) / 1000.0f;
 
     start_ticks = now;
 
@@ -155,6 +124,6 @@ static void shutdown_example(void)
 
 const Example example_photoreal = {
     "photoreal", "Photorealistic Rendering",
-    "Visibility buffer, physically based shading, image-based lighting, soft shadows, ambient occlusion. Space : path tracing, on GPUs with ray tracing.",
-    init, update, render, shutdown_example
+    "Visibility buffer, physically based shading, image-based lighting, soft shadows, ambient occlusion.",
+    init, NULL, render, shutdown_example
 };

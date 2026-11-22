@@ -103,7 +103,7 @@ The photorealistic renderer doesn't use `draw_vertices`. It uses `gpu.h`, a *bin
   into the frame's command list.
 - **Transient memory**: `gpu_frame_alloc` gives per-frame memory.
 - **Ray tracing**: `gpu_raytracing_supported` and `gpu_build_ray_scene`, on DXR 1.1 or
-  `VK_KHR_ray_query`.
+  `VK_KHR_ray_query`. No renderer uses it at the moment.
 
 `gpu_supported()` returns 0 without the requirements:
 
@@ -127,4 +127,4 @@ The photorealistic renderer doesn't use `draw_vertices`. It uses `gpu.h`, a *bin
 - **Backends** provide their part through `RendererBackend::get_stats`: timestamp queries (a
   `VkQueryPool` or an `ID3D12QueryHeap`) and DXGI or VMA memory budgets.
 
-Next: [Photorealistic rendering and path tracing](Photorealistic-Rendering).
+Next: [Photorealistic rendering](Photorealistic-Rendering).

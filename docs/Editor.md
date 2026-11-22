@@ -31,7 +31,7 @@ The editor (`examples/scene-editor/`) opens on a project, from the main menu or 
   - drag and drop from the system, into the view or the inspector;
   - rename, recycle bin, new folder, sound preview.
 
-The view renders the way the project says: photorealistic, path traced or forward.
+The view renders the way the project says: photorealistic or forward.
 
 ## 3D view controls
 

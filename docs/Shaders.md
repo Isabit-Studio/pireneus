@@ -7,7 +7,7 @@ both backends:
 | --- | --- |
 | `sprite.slang` | 2D (`draw_vertices`): one vertex and one fragment shader. |
 | `mesh.slang` | Forward 3D: shadow pass, scene pass, sky. |
-| `photoreal.slang` | The photorealistic renderer and the path tracer. |
+| `photoreal.slang` | The photorealistic renderer. |
 
 ## Compilation
 

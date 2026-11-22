@@ -17,7 +17,7 @@ My Game/
 - **Collision**: up to 16 named layers and their collision matrix.
 - **Character controller**: speed, sprint, jump, acceleration, air control, maximum slope, mass.
 - **Rendering**:
-  - the render path: `RENDER_PATH_PHOTOREAL`, `RENDER_PATH_FORWARD` or `RENDER_PATH_PATH_TRACED`;
+  - the render path: `RENDER_PATH_PHOTOREAL` or `RENDER_PATH_FORWARD`;
   - the look: exposure, tone mapping...;
   - the quality: Low to Ultra, or Custom.
 - **Audio**: master, music and sound volumes.

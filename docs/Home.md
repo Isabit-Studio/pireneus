@@ -16,7 +16,7 @@ them as they are to the project's wiki (see [Publishing this wiki](#publishing-t
 ## The engine
 
 - [Rendering](Rendering): the RHI, 2D rendering, forward 3D rendering, the bindless GPU layer.
-- [Photorealistic rendering and path tracing](Photorealistic-Rendering)
+- [Photorealistic rendering](Photorealistic-Rendering)
 - [Shaders (Slang)](Shaders)
 - [Platforms and input](Platforms-and-Input): SDL3, window, scancode-based keyboard, paths.
 - [UWP](UWP): the Universal Windows Platform backend.

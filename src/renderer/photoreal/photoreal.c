@@ -1,6 +1,5 @@
 // The photorealistic renderer, on the bindless layer of gpu.h (shaders in photoreal.slang) : cascaded
-// shadows, a visibility buffer, GTAO, one full-screen shading pass, bloom and tone mapping ; or, where
-// the GPU traces rays, a progressive path tracer instead of the first four steps.
+// shadows, a visibility buffer, GTAO, one full-screen shading pass, bloom and tone mapping.
 
 #include "renderer/photoreal/photoreal.h"
 
@@ -17,7 +16,6 @@
 #define BRDF_LUT_SIZE 128
 #define NO_TEXTURE 0xFFFFFFFFu
 #define PI_F 3.14159265f
-#define MAX_PATH_SAMPLES 16384 // past this, the image has converged : no more rays are traced
 
 // Mirrors Frame in photoreal.slang, field for field.
 typedef struct
@@ -90,7 +88,6 @@ static GpuPipeline* bloom_down_pipeline;
 static GpuPipeline* bloom_up_pipeline;
 static GpuPipeline* tonemap_pipeline;
 static GpuPipeline* fxaa_pipeline;
-static GpuPipeline* path_trace_pipeline; // NULL without ray tracing
 
 static Texture* brdf_lut;
 static Texture* shadow_maps[MAX_CASCADES];
@@ -104,10 +101,6 @@ static Texture* ao_blur_target;
 static Texture* bloom_targets[BLOOM_LEVELS];
 static Texture* ldr_target;
 static Texture* final_target;
-static Texture* accumulation_targets[2]; // the path tracer's running average, ping-ponged
-static int accumulation_current;
-static int accumulated_samples;
-static uint64_t accumulation_key;        // what the image depends on : a change restarts it
 static int target_width;   // internal resolution
 static int target_height;
 static int final_width;    // window resolution
@@ -137,9 +130,6 @@ void photoreal_default_quality(PhotorealQuality* out_quality)
     out_quality->ao_steps = 5;
     out_quality->bloom_enabled = 1;
     out_quality->fxaa_enabled = 1;
-    out_quality->path_tracing = 0;
-    out_quality->path_bounces = 4;
-    out_quality->path_samples_per_frame = 2;
 }
 
 void photoreal_default_look(PhotorealLook* out_look)
@@ -304,11 +294,6 @@ int photoreal_create(void)
     tonemap_pipeline = screen_pipeline("pr_tonemap_ps", GPU_FORMAT_RGBA8, GPU_BLEND_NONE);
     fxaa_pipeline = screen_pipeline("pr_fxaa_ps", GPU_FORMAT_RGBA8, GPU_BLEND_NONE);
 
-    if (gpu_raytracing_supported())
-    {
-        path_trace_pipeline = screen_pipeline("pr_pathtrace_ps", GPU_FORMAT_RGBA32F, GPU_BLEND_NONE);
-    }
-
     brdf_lut = create_brdf_lut();
 
     if (!shadow_pipeline || !shadow_masked_pipeline || !visibility_pipeline || !ao_pipeline || !ao_blur_pipeline || !shade_pipeline ||
@@ -347,8 +332,6 @@ static void destroy_targets(void)
     destroy_target(&ao_blur_target);
     destroy_target(&ldr_target);
     destroy_target(&final_target);
-    destroy_target(&accumulation_targets[0]);
-    destroy_target(&accumulation_targets[1]);
 
     for (int i = 0; i < BLOOM_LEVELS; i++)
     {
@@ -394,23 +377,11 @@ void photoreal_destroy(void)
     gpu_destroy_pipeline(bloom_up_pipeline);
     gpu_destroy_pipeline(tonemap_pipeline);
     gpu_destroy_pipeline(fxaa_pipeline);
-    gpu_destroy_pipeline(path_trace_pipeline);
-    path_trace_pipeline = NULL;
 
     shadow_pipeline = shadow_masked_pipeline = visibility_pipeline = ao_pipeline = ao_blur_pipeline = shade_pipeline = NULL;
     bloom_down_pipeline = bloom_up_pipeline = tonemap_pipeline = fxaa_pipeline = NULL;
 
     created = 0;
-}
-
-int photoreal_path_tracing_supported(void)
-{
-    return path_trace_pipeline != NULL;
-}
-
-int photoreal_accumulated_samples(void)
-{
-    return accumulated_samples;
 }
 
 void photoreal_set_settings(const PhotorealQuality* new_quality, const PhotorealLook* new_look)
@@ -551,13 +522,6 @@ static int ensure_targets(int width, int height, int window_width, int window_he
     ldr_target = create_target(width, height, GPU_FORMAT_RGBA8, GPU_USAGE_RENDER_TARGET);
     final_target = create_target(window_width, window_height, GPU_FORMAT_RGBA8, GPU_USAGE_RENDER_TARGET);
 
-    if (path_trace_pipeline)
-    {
-        accumulation_targets[0] = create_target(width, height, GPU_FORMAT_RGBA32F, GPU_USAGE_RENDER_TARGET);
-        accumulation_targets[1] = create_target(width, height, GPU_FORMAT_RGBA32F, GPU_USAGE_RENDER_TARGET);
-    }
-
-    accumulated_samples = 0;
     bloom_level_count = 0;
 
     for (int i = 0; i < BLOOM_LEVELS; i++)
@@ -776,76 +740,6 @@ static void fullscreen_pass(Texture* target, GpuPipeline* pipeline, const PassCo
     gpu_end_pass();
 }
 
-// A hash of everything the path traced image depends on.
-static uint64_t hash_bytes(uint64_t hash, const void* data, size_t size)
-{
-    const uint8_t* bytes = data;
-
-    for (size_t i = 0; i < size; i++)
-    {
-        hash = (hash ^ bytes[i]) * 1099511628211ull;
-    }
-
-    return hash;
-}
-
-// The path tracer : runs instead of the shadow, visibility, AO and shading passes, into the accumulation.
-// Returns the image to post-process.
-static Texture* render_path_traced(PassConstants* constants, const Mat4* view_projection)
-{
-    uint64_t key = 14695981039346656037ull;
-    key = hash_bytes(key, view_projection->m, sizeof(view_projection->m));
-    key = hash_bytes(key, instances, sizeof(PhotorealInstance) * (size_t)draw_count);
-    key = hash_bytes(key, sun_direction, sizeof(sun_direction));
-    key = hash_bytes(key, sun_color, sizeof(sun_color));
-    key = hash_bytes(key, &environment, sizeof(environment));
-    key = hash_bytes(key, &look.sky_intensity, sizeof(look.sky_intensity));
-    key = hash_bytes(key, &look.sun_softness, sizeof(look.sun_softness));
-    key = hash_bytes(key, &quality.path_bounces, sizeof(quality.path_bounces));
-
-    if (key != accumulation_key)
-    {
-        accumulation_key = key;
-        accumulated_samples = 0;
-    }
-
-    if (accumulated_samples >= MAX_PATH_SAMPLES)
-    {
-        return accumulation_targets[accumulation_current];
-    }
-
-    static GpuRayInstance ray_instances[MAX_DRAWS];
-
-    for (int i = 0; i < draw_count; i++)
-    {
-        ray_instances[i].mesh = draws[i].mesh;
-        ray_instances[i].first_index = draws[i].first_index;
-        ray_instances[i].index_count = draws[i].index_count;
-        SDL_memcpy(ray_instances[i].transform, instances[i].model, sizeof(ray_instances[i].transform));
-        ray_instances[i].alpha_tested = (instances[i].geometry[3] & 1u) != 0 && instances[i].textures[0] != NO_TEXTURE;
-    }
-
-    uint32_t tlas = gpu_build_ray_scene(ray_instances, draw_count);
-
-    int next = 1 - accumulation_current;
-    int samples = SDL_max(1, quality.path_samples_per_frame);
-
-    SDL_zero(constants->inputs);
-    constants->inputs[0] = gpu_texture_index(accumulation_targets[accumulation_current]);
-    constants->inputs[1] = tlas;
-    constants->params[0] = (float)accumulated_samples;
-    constants->params[1] = (float)quality.path_bounces;
-    constants->params[2] = (float)samples;
-    constants->params[3] = SDL_max(environment->average_luminance * 300.0f, SDL_max(sun_color[0], SDL_max(sun_color[1], sun_color[2])) * 4.0f);
-
-    fullscreen_pass(accumulation_targets[next], path_trace_pipeline, constants);
-
-    accumulation_current = next;
-    accumulated_samples += samples;
-
-    return accumulation_targets[next];
-}
-
 void photoreal_render(int width, int height)
 {
     if (!created || !environment || width <= 0 || height <= 0)
@@ -959,15 +853,9 @@ void photoreal_render(int width, int height)
     constants.ids[2] = instance_memory.offset;
 
     Texture* lit_image = hdr_target;
-    int path_tracing = quality.path_tracing && path_trace_pipeline && draw_count > 0;
-
-    if (path_tracing)
-    {
-        lit_image = render_path_traced(&constants, &view_projection);
-    }
 
     // 1. Shadow cascades.
-    for (int c = 0; c < quality.shadow_cascades && !path_tracing; c++)
+    for (int c = 0; c < quality.shadow_cascades; c++)
     {
         GpuPassDesc pass;
         SDL_zero(pass);
@@ -1001,36 +889,33 @@ void photoreal_render(int width, int height)
     }
 
     // 2. Visibility buffer : which triangle covers each pixel.
-    if (!path_tracing)
+    GpuPassDesc pass;
+    SDL_zero(pass);
+    pass.colors[0].texture = visibility_target;
+    pass.colors[0].load = GPU_LOAD_CLEAR;
+    pass.colors[0].clear[0] = pass.colors[0].clear[1] = pass.colors[0].clear[2] = pass.colors[0].clear[3] = 1.0f;
+    pass.color_count = 1;
+    pass.depth = depth_target;
+    pass.depth_load = GPU_LOAD_CLEAR;
+    pass.depth_clear = 1.0f;
+
+    gpu_begin_pass(&pass);
+    gpu_bind_pipeline(visibility_pipeline);
+
+    for (int i = 0; i < draw_count; i++)
     {
-        GpuPassDesc pass;
-        SDL_zero(pass);
-        pass.colors[0].texture = visibility_target;
-        pass.colors[0].load = GPU_LOAD_CLEAR;
-        pass.colors[0].clear[0] = pass.colors[0].clear[1] = pass.colors[0].clear[2] = pass.colors[0].clear[3] = 1.0f;
-        pass.color_count = 1;
-        pass.depth = depth_target;
-        pass.depth_load = GPU_LOAD_CLEAR;
-        pass.depth_clear = 1.0f;
-
-        gpu_begin_pass(&pass);
-        gpu_bind_pipeline(visibility_pipeline);
-
-        for (int i = 0; i < draw_count; i++)
+        if (draw_in_view(&draws[i], &view_projection))
         {
-            if (draw_in_view(&draws[i], &view_projection))
-            {
-                constants.ids[3] = (uint32_t)i;
-                gpu_push_constants(&constants, sizeof(constants));
-                gpu_draw_indexed(draws[i].mesh, draws[i].first_index, draws[i].index_count);
-            }
+            constants.ids[3] = (uint32_t)i;
+            gpu_push_constants(&constants, sizeof(constants));
+            gpu_draw_indexed(draws[i].mesh, draws[i].first_index, draws[i].index_count);
         }
-
-        gpu_end_pass();
     }
 
+    gpu_end_pass();
+
     // 3. Ambient occlusion, from depth, blurred.
-    if (quality.ao_enabled && !path_tracing)
+    if (quality.ao_enabled)
     {
         SDL_zero(constants.inputs);
         constants.inputs[0] = gpu_texture_index(depth_target);
@@ -1055,12 +940,9 @@ void photoreal_render(int width, int height)
     }
 
     // 4. Shading : each pixel exactly once.
-    if (!path_tracing)
-    {
-        SDL_zero(constants.inputs);
-        constants.inputs[0] = gpu_texture_index(visibility_target);
-        fullscreen_pass(hdr_target, shade_pipeline, &constants);
-    }
+    SDL_zero(constants.inputs);
+    constants.inputs[0] = gpu_texture_index(visibility_target);
+    fullscreen_pass(hdr_target, shade_pipeline, &constants);
 
     // 5. Bloom : a chain of downsamples, then back up, each level adding to the next.
     if (quality.bloom_enabled && bloom_level_count > 0)
@@ -1123,7 +1005,7 @@ void photoreal_render(int width, int height)
     constants.inputs[0] = gpu_texture_index(ldr_target);
     constants.params[0] = 1.0f / (float)internal_width;
     constants.params[1] = 1.0f / (float)internal_height;
-    constants.params[2] = quality.fxaa_enabled && !path_tracing ? 1.0f : 0.0f; // the path tracer antialiases on its own
+    constants.params[2] = quality.fxaa_enabled ? 1.0f : 0.0f;
     fullscreen_pass(final_target, fxaa_pipeline, &constants);
 }
 

@@ -1,4 +1,4 @@
-# Photorealistic rendering and path tracing
+# Photorealistic rendering
 
 - Code: `src/renderer/photoreal/`.
 - Shaders: `src/renderer/shaders/photoreal.slang`.
@@ -24,7 +24,6 @@ Helpers:
 
 - `photoreal_default_quality`, `photoreal_default_look` and `photoreal_default_material` give starting
   values.
-- `photoreal_accumulated_samples()` tells how far the path tracer has converged.
 
 The shader's `Frame` and `Instance` structs mirror those of `photoreal.c` exactly: they must change
 together.
@@ -41,20 +40,6 @@ together.
    - analytic height fog and approximate bounce light.
 5. **Post-processing**: bloom, tone mapping (ACES, Khronos Neutral or Reinhard), S-curve, saturation,
    vignette, FXAA. Auto exposure is `0.22 / average luminance × 2^EV`.
-
-## Path tracing
-
-With the `RENDER_PATH_PATH_TRACED` render path, and when `photoreal_path_tracing_supported()`
-(hardware ray tracing), `prPathTracePs` replaces steps 1 to 4. It is a pixel shader that traces with
-*ray queries*:
-
-- **Sampling**: GGX VNDF sampling, and cosine-weighted diffuse.
-- **Lighting**: direct light toward a point on the sun's disk.
-- **Termination**: Russian roulette. Alpha masks are tested for each candidate hit.
-- **Accumulation**: in RGBA32F. It restarts from zero whenever the camera, the objects, the sun or the
-  environment change, and stops at `MAX_PATH_SAMPLES`.
-- **Invalid samples**: NaN and infinite samples are discarded with `isnan` and `isinf`. dxc compiles
-  with fast math, so a plain comparison doesn't catch them.
 
 ## Environment
 

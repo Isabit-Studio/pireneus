@@ -44,9 +44,6 @@ typedef struct
     int ao_steps;
     int bloom_enabled;
     int fxaa_enabled;
-    int path_tracing;           // the reference mode, on GPUs with ray tracing (see photoreal_path_tracing_supported())
-    int path_bounces;
-    int path_samples_per_frame;
 } PhotorealQuality;
 
 // The image's look.
@@ -105,8 +102,6 @@ typedef struct
 } PhotorealCamera;
 
 int photoreal_create(void); // after create_renderer() ; 0 if the GPU can't run it
-int photoreal_path_tracing_supported(void);
-int photoreal_accumulated_samples(void); // how converged the path tracer's image is
 void photoreal_destroy(void);
 
 void photoreal_set_settings(const PhotorealQuality* quality, const PhotorealLook* look);

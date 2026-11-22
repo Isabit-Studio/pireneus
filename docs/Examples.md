@@ -13,7 +13,7 @@ A "Menu" button, at the bottom right, goes back to the menu.
 | `pixel-perfect` | Pixel Perfect | The same map, see [below](#pixel-perfect). |
 | `tilemap-editor` | Tilemap Editor | A Tiled map editor, see [below](#tilemap-editor). |
 | `3d-test` | 3D Test | The forward renderer on `resources/3D-test/Debug.fbx`: one directional light, a 2048×2048 shadow map, an orbiting camera. |
-| `photoreal` | Photorealistic Rendering | The photorealistic renderer on the same scene, under a procedural sky. Space toggles path tracing, if the GPU has ray tracing. |
+| `photoreal` | Photorealistic Rendering | The photorealistic renderer on the same scene, under a procedural sky, with an orbiting camera. |
 
 ### Pixel Perfect
 

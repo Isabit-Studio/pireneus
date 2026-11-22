@@ -25,8 +25,7 @@ typedef enum
 typedef enum
 {
     RENDER_PATH_PHOTOREAL,
-    RENDER_PATH_FORWARD,  // the simple forward renderer, for GPUs that can't run the other, or for speed
-    RENDER_PATH_PATH_TRACED // progressive path tracing, on GPUs with ray tracing : the reference image
+    RENDER_PATH_FORWARD   // the simple forward renderer, for GPUs that can't run the other, or for speed
 } RenderPath;
 
 typedef enum

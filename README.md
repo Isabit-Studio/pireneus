@@ -10,7 +10,7 @@
 
 <p align="center">
   A 2D / 3D game engine written in <b>Orthodox C++</b>, by <b>Isabit Studio</b>.<br>
-  Vulkan and DirectX 12 · photorealistic rendering and path tracing · scene and level editor · Box2D / Box3D physics.
+  Vulkan and DirectX 12 · photorealistic rendering · scene and level editor · Box2D / Box3D physics.
 </p>
 
 ---
@@ -28,8 +28,7 @@ What it includes:
   the same binary, and one is picked at startup. On top of it:
   - batched 2D rendering, with an API inspired by XNA / MonoGame;
   - a forward 3D renderer with shadows;
-  - a **photorealistic renderer**: visibility buffer, PBR, IBL, GTAO, bloom, tone mapping;
-  - a progressive **path tracer**, on GPUs with hardware ray tracing.
+  - a **photorealistic renderer**: visibility buffer, PBR, IBL, GTAO, bloom, tone mapping.
 - **Shaders**: a single [Slang](https://shader-slang.org/) source for both backends (SPIR-V and DXIL).
 - **Platforms**: Windows (Win32 through SDL3, and UWP with a custom CoreWindow backend). The
   architecture is ready for Linux and macOS (see [platform status](docs/Platforms-and-Input.md)).

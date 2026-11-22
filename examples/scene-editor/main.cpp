@@ -762,9 +762,7 @@ void editor_apply_settings(void)
 
     if (photoreal_ready)
     {
-        PhotorealQuality quality = settings->quality;
-        quality.path_tracing = settings->render_path == RENDER_PATH_PATH_TRACED;
-        photoreal_set_settings(&quality, &settings->look);
+        photoreal_set_settings(&settings->quality, &settings->look);
     }
 
     audio_set_volumes(settings->master_volume, settings->music_volume, settings->sound_volume);

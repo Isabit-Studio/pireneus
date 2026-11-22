@@ -210,7 +210,7 @@ int project_save(const Project* project)
 
     const PhotorealLook* l = &s->look;
     write_text(&w, "  \"rendering\": { \"path\": \"%s\", \"exposure_ev\": %g, \"tonemapper\": %d, \"bloom_strength\": %g, \"contrast\": %g, \"saturation\": %g, \"vignette\": %g, ",
-        s->render_path == RENDER_PATH_FORWARD ? "forward" : s->render_path == RENDER_PATH_PATH_TRACED ? "path_traced" : "photoreal", l->exposure_ev, (int)l->tonemapper, l->bloom_strength, l->contrast, l->saturation, l->vignette);
+        s->render_path == RENDER_PATH_FORWARD ? "forward" : "photoreal", l->exposure_ev, (int)l->tonemapper, l->bloom_strength, l->contrast, l->saturation, l->vignette);
     write_text(&w, "\"ao_radius\": %g, \"ao_power\": %g, \"sky_intensity\": %g, \"bounce_strength\": %g, \"sun_softness\": %g, ",
         l->ao_radius, l->ao_power, l->sky_intensity, l->bounce_strength, l->sun_softness);
     write_text(&w, "\"fog_density\": %g, \"fog_height_falloff\": %g, \"fog_base_height\": %g, \"fog_color\": [%g, %g, %g], \"fog_sun_color\": [%g, %g, %g], \"fog_sun_power\": %g },\n",
@@ -220,8 +220,8 @@ int project_save(const Project* project)
     const PhotorealQuality* q = &s->quality;
     write_text(&w, "  \"quality\": { \"preset\": %d, \"render_scale\": %g, \"shadow_resolution\": %d, \"shadow_cascades\": %d, \"shadow_samples\": %d, \"shadow_distance\": %g, ",
         s->quality_preset, q->render_scale, q->shadow_resolution, q->shadow_cascades, q->shadow_samples, q->shadow_distance);
-    write_text(&w, "\"ao\": %d, \"ao_slices\": %d, \"ao_steps\": %d, \"bloom\": %d, \"fxaa\": %d, \"path_bounces\": %d, \"path_samples\": %d },\n",
-        q->ao_enabled, q->ao_slices, q->ao_steps, q->bloom_enabled, q->fxaa_enabled, q->path_bounces, q->path_samples_per_frame);
+    write_text(&w, "\"ao\": %d, \"ao_slices\": %d, \"ao_steps\": %d, \"bloom\": %d, \"fxaa\": %d },\n",
+        q->ao_enabled, q->ao_slices, q->ao_steps, q->bloom_enabled, q->fxaa_enabled);
 
     write_text(&w, "  \"audio\": { \"master\": %g, \"music\": %g, \"sound\": %g }\n}\n", s->master_volume, s->music_volume, s->sound_volume);
 
@@ -374,7 +374,8 @@ int project_open(const char* path, Project* out_project)
 
     if (render_path[0] != '\0') // absent : the template's default stays
     {
-        s->render_path = SDL_strcmp(render_path, "forward") == 0 ? RENDER_PATH_FORWARD : SDL_strcmp(render_path, "path_traced") == 0 ? RENDER_PATH_PATH_TRACED : RENDER_PATH_PHOTOREAL;
+        // Anything else, the former "path_traced" included, is the photorealistic renderer.
+        s->render_path = SDL_strcmp(render_path, "forward") == 0 ? RENDER_PATH_FORWARD : RENDER_PATH_PHOTOREAL;
     }
 
     l->exposure_ev = read_float(rendering, "exposure_ev", l->exposure_ev);
@@ -408,8 +409,6 @@ int project_open(const char* path, Project* out_project)
     q->ao_steps = SDL_clamp(read_int(quality, "ao_steps", q->ao_steps), 1, 16);
     q->bloom_enabled = read_int(quality, "bloom", q->bloom_enabled);
     q->fxaa_enabled = read_int(quality, "fxaa", q->fxaa_enabled);
-    q->path_bounces = SDL_clamp(read_int(quality, "path_bounces", q->path_bounces), 1, 32);
-    q->path_samples_per_frame = SDL_clamp(read_int(quality, "path_samples", q->path_samples_per_frame), 1, 64);
 
     const JsonValue* audio = json_object_get(root, "audio");
     s->master_volume = read_float(audio, "master", s->master_volume);

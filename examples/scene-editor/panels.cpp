@@ -1015,16 +1015,11 @@ void editor_draw_project_settings(void)
 
         if (ImGui::BeginTabItem("Rendering"))
         {
-            static const char* const paths[] = { "Photorealistic", "Simple forward", "Path traced (reference)" };
+            static const char* const paths[] = { "Photorealistic", "Simple forward" };
             static const char* const tonemappers[] = { "ACES", "Khronos Neutral", "Reinhard", "None" };
             int tonemapper = (int)s->look.tonemapper;
 
-            changed |= ImGui::Combo("Render path", &s->render_path, paths, photoreal_path_tracing_supported() ? 3 : 2);
-
-            if (s->render_path == RENDER_PATH_PATH_TRACED)
-            {
-                ImGui::TextDisabled("%d samples accumulated : stop moving to let it converge.", photoreal_accumulated_samples());
-            }
+            changed |= ImGui::Combo("Render path", &s->render_path, paths, 2);
 
             ImGui::SeparatorText("Image");
             changed |= ImGui::SliderFloat("Exposure (EV)", &s->look.exposure_ev, -5.0f, 5.0f, "%.2f");
@@ -1098,13 +1093,6 @@ void editor_draw_project_settings(void)
             quality_changed |= ImGui::SliderInt("AO steps", &q->ao_steps, 1, 16);
             if (ImGui::Checkbox("Bloom", &bloom)) { q->bloom_enabled = bloom; quality_changed = true; }
             if (ImGui::Checkbox("FXAA", &fxaa)) { q->fxaa_enabled = fxaa; quality_changed = true; }
-
-            if (photoreal_path_tracing_supported())
-            {
-                ImGui::SeparatorText("Path tracing");
-                quality_changed |= ImGui::SliderInt("Bounces", &q->path_bounces, 1, 16);
-                quality_changed |= ImGui::SliderInt("Samples per frame", &q->path_samples_per_frame, 1, 16);
-            }
 
             if (quality_changed)
             {

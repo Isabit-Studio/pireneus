@@ -31,7 +31,6 @@ set(PIRENEUS_SHADER_ENTRY_POINTS
     "photoreal.slang,prBloomUpPs,fragment,pr_bloom_up_ps.spv,ps_6_0,pr_bloom_up_ps.cso"
     "photoreal.slang,prTonemapPs,fragment,pr_tonemap_ps.spv,ps_6_0,pr_tonemap_ps.cso"
     "photoreal.slang,prFxaaPs,fragment,pr_fxaa_ps.spv,ps_6_0,pr_fxaa_ps.cso"
-    "photoreal.slang,prPathTracePs,fragment,pr_pathtrace_ps.spv,ps_6_5,pr_pathtrace_ps.cso"
 )
 
 function(pireneus_compile_shaders)
