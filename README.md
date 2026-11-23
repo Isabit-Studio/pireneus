@@ -13,6 +13,12 @@
   Vulkan and DirectX 12 · Forward+ and Deferred+ · baked lighting · scene and level editor · Box2D / Box3D physics.
 </p>
 
+<p align="center">
+  <picture>
+    <img alt="Screenshot" src="resources/screenshot.png">
+  </picture>
+</p>
+
 ---
 
 ## Overview
