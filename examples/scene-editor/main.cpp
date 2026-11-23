@@ -945,7 +945,8 @@ static float intersect_triangle(Vec3 origin, Vec3 direction, Vec3 a, Vec3 b, Vec
 }
 
 // Ray / axis-aligned box (slab test) : whether the ray hits the box at all, as an early-out.
-static bool intersects_box(Vec3 origin, Vec3 direction, const float bounds[6])
+// out_t (may be NULL) : where the ray enters the box, 0 if it starts inside.
+static bool intersects_box(Vec3 origin, Vec3 direction, const float bounds[6], float* out_t = NULL)
 {
     float t_min = 0.0f;
     float t_max = 1e30f;
@@ -971,6 +972,11 @@ static bool intersects_box(Vec3 origin, Vec3 direction, const float bounds[6])
         float t2 = (hi - o[axis]) / d[axis];
         t_min = SDL_max(t_min, SDL_min(t1, t2));
         t_max = SDL_min(t_max, SDL_max(t1, t2));
+    }
+
+    if (out_t)
+    {
+        *out_t = t_min;
     }
 
     return t_min <= t_max;
@@ -1050,6 +1056,11 @@ int editor_object_bounds(const SceneObject* object, float out[6])
 // The ray is moved into each object's local space (origin and direction both transformed, direction left
 // unnormalized), where its parameter t stays the same as in world space : hits on different objects
 // compare directly.
+bool editor_camera_dragging(void)
+{
+    return camera_drag != CAMERA_DRAG_NONE;
+}
+
 int editor_raycast(Vec3 origin, Vec3 direction, int filter, float* out_t, int* out_face)
 {
     int best = -1;
@@ -1161,18 +1172,33 @@ int editor_raycast(Vec3 origin, Vec3 direction, int filter, float* out_t, int* o
 
         const ModelData* data = &model->data;
 
-        for (int t = 0; t + 2 < data->index_count; t += 3)
+        // Submesh by submesh, each behind its box : a large model (a whole street) is millions of
+        // triangles, and the hover pick runs every frame.
+        for (int s = 0; s < data->submesh_count; s++)
         {
-            const MeshVertex* a = &data->vertices[data->indices[t]];
-            const MeshVertex* b = &data->vertices[data->indices[t + 1]];
-            const MeshVertex* c = &data->vertices[data->indices[t + 2]];
-            float hit = intersect_triangle(o, d, vec3(a->x, a->y, a->z), vec3(b->x, b->y, b->z), vec3(c->x, c->y, c->z));
+            const ModelSubmesh* submesh = &data->submeshes[s];
+            float entry = 0.0f;
 
-            if (hit > 0.0f && hit < best_t)
+            if (!intersects_box(o, d, submesh->bounds, &entry) || entry >= best_t)
             {
-                best_t = hit;
-                best = i;
-                best_face = -1;
+                continue;
+            }
+
+            int end = submesh->first_index + submesh->index_count;
+
+            for (int t = submesh->first_index; t + 2 < end; t += 3)
+            {
+                const MeshVertex* a = &data->vertices[data->indices[t]];
+                const MeshVertex* b = &data->vertices[data->indices[t + 1]];
+                const MeshVertex* c = &data->vertices[data->indices[t + 2]];
+                float hit = intersect_triangle(o, d, vec3(a->x, a->y, a->z), vec3(b->x, b->y, b->z), vec3(c->x, c->y, c->z));
+
+                if (hit > 0.0f && hit < best_t)
+                {
+                    best_t = hit;
+                    best = i;
+                    best_face = -1;
+                }
             }
         }
     }

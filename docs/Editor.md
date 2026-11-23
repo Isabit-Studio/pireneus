@@ -56,6 +56,12 @@ their box.
 
 The positional keys are grouped in `#define KEY_*` at the top of `main.cpp` and `level_editor.cpp`.
 
+Picking (and the highlight of what's under the mouse, every frame) casts a ray into each object's local
+space: its box first, then each submesh's box (skipped if it starts behind the best hit so far), then the
+triangles. A model of millions of
+triangles (the [Bistro](Demo-Scenes)) only has a few submeshes' triangles tested. The hover highlight
+pauses while the camera orbits, pans or flies.
+
 ## Profiler
 
 The **Profiler** menu of the menu bar toggles two displays, independently:

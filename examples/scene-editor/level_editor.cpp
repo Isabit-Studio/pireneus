@@ -1859,7 +1859,7 @@ static bool select_tool_3d(const CameraMatrices* camera, bool hovered, ImDrawLis
     bool over_gizmo = gizmo_drawn && ImGuizmo::IsOver();
     Pick hover = no_pick;
 
-    if (hovered && !marquee_active && !over_gizmo && !io.KeyAlt)
+    if (hovered && !marquee_active && !over_gizmo && !io.KeyAlt && !editor_camera_dragging())
     {
         hover = pick_3d(camera, io.MousePos);
     }

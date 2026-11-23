@@ -127,6 +127,7 @@ void editor_mouse_ray(const CameraMatrices* camera, ImVec2 point, Vec3* out_orig
 // The closest object along a ray, -1 if none : its ray parameter, and the face hit if it's an editable mesh.
 enum { RAYCAST_ALL, RAYCAST_MESHES };
 int editor_raycast(Vec3 origin, Vec3 direction, int filter, float* out_t, int* out_face);
+bool editor_camera_dragging(void); // orbiting, panning or flying : no hover picking meanwhile
 
 // An object's local bounds (min xyz, max xyz), 0 if it has none to speak of.
 int editor_object_bounds(const SceneObject* object, float out_bounds[6]);

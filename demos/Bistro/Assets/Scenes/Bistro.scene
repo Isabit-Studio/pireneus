@@ -2,7 +2,7 @@
   "skybox": "",
   "sun": { "yaw": -2.48, "pitch": 0.15, "intensity": 1, "from_environment": 0 },
   "clouds": { "coverage": 0.45, "density": 0.7, "altitude": 1500, "scale": 900, "wind": [6, 2], "shadows": 0.5 },
-  "view": { "target": [-31.4222, 11.3275, -11.1984], "yaw": 14.2109, "pitch": 0.105, "distance": 8.08701 },
+  "view": { "target": [-14.126, 3.76855, 0.293173], "yaw": 16.8158, "pitch": -0.164999, "distance": 8.08701 },
   "objects": [
     { "name": "Bistro", "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1], "model": "../../resources/3D-test/Bistro_v5_2/BistroExterior.fbx", "physics": { "body": 1, "collider": 0, "is_2d": 0, "density": 1, "friction": 0.6, "restitution": 0, "layer": 0, "character": 0 } },
     { "name": "Street Lamp 1", "position": [-3.39, 6.47, -29.5], "rotation": [0, -0, 0], "scale": [1, 1, 1], "light": { "type": 1, "color": [1, 0.74, 0.46], "intensity": 150, "range": 18, "spot_angle": 60, "spot_softness": 0.3, "shadows": 1, "mode": 1 } },
@@ -48,6 +48,6 @@
     { "name": "Awning Bulb 8", "position": [12.45, 6.52, 7.12], "rotation": [0, 0, 0], "scale": [1, 1, 1], "light": { "type": 1, "color": [1, 0.82, 0.6], "intensity": 18, "range": 5, "spot_angle": 60, "spot_softness": 0.3, "shadows": 0, "mode": 1 } },
     { "name": "Awning Bulb 9", "position": [8.97, 6.52, 5.74], "rotation": [0, 0, 0], "scale": [1, 1, 1], "light": { "type": 1, "color": [1, 0.82, 0.6], "intensity": 18, "range": 5, "spot_angle": 60, "spot_softness": 0.3, "shadows": 0, "mode": 1 } },
     { "name": "Awning Bulb 10", "position": [5.78, 6.52, 4.48], "rotation": [0, 0, 0], "scale": [1, 1, 1], "light": { "type": 1, "color": [1, 0.82, 0.6], "intensity": 18, "range": 5, "spot_angle": 60, "spot_softness": 0.3, "shadows": 0, "mode": 1 } },
-    { "name": "Cylinder", "position": [-20.5922, 2.49446, -8.61942], "rotation": [0, -0, 0], "scale": [0.5, 1, 0.5], "model": "builtin/cylinder", "physics": { "body": 0, "collider": 0, "is_2d": 0, "density": 1, "friction": 0.6, "restitution": 0, "layer": 1, "character": 1 } }
+    { "name": "Cylinder", "position": [-30.3025, 2.49446, -16.4493], "rotation": [0, -0, 0], "scale": [0.5, 1, 0.5], "model": "builtin/cylinder", "physics": { "body": 0, "collider": 0, "is_2d": 0, "density": 1, "friction": 0.6, "restitution": 0, "layer": 1, "character": 1 } }
   ]
 }
