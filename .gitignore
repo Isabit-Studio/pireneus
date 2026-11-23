@@ -112,6 +112,9 @@ ctr
 # Blender's automatic backups
 *.blend1
 
+# Demo content downloaded separately (see docs/Demo-Scenes.md)
+resources/3D-test/Bistro_v5_2/
+
 ### CMake ###
 CMakeLists.txt.user
 CMakeCache.txt

@@ -135,6 +135,6 @@ view, or shorter than a pixel, are skipped, so dense models stay cheap to draw.
 - **Building**: meshes are triangulated with flat shading, one part per material.
 - **Lifetime**: they are rebuilt when their revision changes, and released a few frames after their
   last use.
-- **Drawing**:
-  - the forward renderer draws each part with `draw_mesh_range()`, in a solid color;
-  - the photorealistic renderer samples the texture.
+- **Drawing**: the 3D renderer draws each part with its material's texture. The mesh's vertices and
+  indices, and the face of each vertex, stay on the CPU too: the baker unwraps one lightmap chart per
+  face (see [Baked lighting](Baked-Lighting)).

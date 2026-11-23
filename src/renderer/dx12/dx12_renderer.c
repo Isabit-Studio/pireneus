@@ -18,7 +18,6 @@
 
 #include "renderer/renderer.h"
 #include "renderer/ortho.h"
-#include "renderer/mesh_constants.h"
 #include "renderer/dx12/dx12_renderer.h"
 #include "debug.h"
 
@@ -31,7 +30,7 @@ static int vertex_buffer_full_reported; // the overflow message was printed this
 
 #define VERTEX_BUFFER_SIZE (8 * 1024 * 1024) // per frame in flight : 262144 vertices
 #define MAX_TEXTURES 8192 // the shader-visible heap : textures and buffers alike (the bindless table, see gpu.h)
-#define GPU_FRAME_BUFFER_SIZE (8 * 1024 * 1024)
+#define GPU_FRAME_BUFFER_SIZE (32 * 1024 * 1024)
 #define SHADER_READ_STATE (D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE)
 
 struct Texture
@@ -40,6 +39,7 @@ struct Texture
     UINT srv_index;
     UINT width, height;
     int is_depth;
+    UINT samples;
     ID3D12DescriptorHeap* target_heap;            // gpu_create_texture() targets : a dedicated 1-entry RTV/DSV heap
     D3D12_CPU_DESCRIPTOR_HANDLE target_handle;
 };
@@ -73,7 +73,7 @@ typedef struct
 
 struct Mesh
 {
-    // Default heap : the photoreal renderer's shading pass reads vertices for every pixel.
+    // Default heap : Deferred+'s shading pass reads vertices for every pixel.
     ID3D12Resource* vertex_buffer;
     ID3D12Resource* index_buffer;
     D3D12_VERTEX_BUFFER_VIEW vertex_view;
@@ -84,14 +84,7 @@ struct Mesh
     UINT vertex_count;
     Blas* blas;
     int blas_count;
-};
-
-struct ShadowMap
-{
-    Texture texture; // R32_TYPELESS resource : DSV (D32_FLOAT) while rendered, SRV (R32_FLOAT) while sampled
-    ID3D12DescriptorHeap* dsv_heap; // dedicated 1-entry heap
-    D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle;
-    int size;
+    int blas_hint;          // where the next lookup looks first
 };
 
 #ifdef PIRENEUS_UWP
@@ -129,18 +122,6 @@ static ID3D12GraphicsCommandList* active_command_list;
 
 static ID3D12RootSignature* root_signature;
 static ID3D12PipelineState* pipeline_state;
-
-// --- 3D (see begin_scene / begin_shadow_pass) ---
-static ID3D12Resource* depth_buffer; // the window pass's depth buffer, recreated with the swapchain
-static ID3D12DescriptorHeap* dsv_heap;
-static D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle;
-static ID3D12RootSignature* mesh_root_signature; // 60 root constants (MeshConstants) + the shadow map's SRV table
-static ID3D12PipelineState* mesh_pipeline_state;
-static ID3D12PipelineState* shadow_pipeline_state;
-static ID3D12PipelineState* sky_pipeline_state; // full-screen triangle at the far plane, no input layout
-static Texture* scene_pass_texture; // what begin_scene() bound (shadow map), restored after draw_skybox()
-static ShadowMap* active_shadow_map; // during begin_shadow_pass()/end_shadow_pass()
-static MeshConstants mesh_constants; // the current pass's constants ; draw_mesh() only changes `model`
 
 static ID3D12Resource* vertex_buffers[FRAME_COUNT];
 static void* vertex_buffer_mapped[FRAME_COUNT];
@@ -513,9 +494,8 @@ static int create_commands(void)
     return 1;
 }
 
-// Both root signatures share one shape : root constants at b0 (parameter 0), one SRV table at t0
-// (parameter 1, pixel shader) and a static point/clamp sampler at s0 — the layout Slang generates
-// for sprite.slang and mesh.slang alike.
+// The sprite root signature : root constants at b0 (parameter 0), one SRV table at t0 (parameter 1,
+// pixel shader) and a static point/clamp sampler at s0, the layout Slang generates for sprite.slang.
 static int create_root_signature_with(UINT constant_count, D3D12_SHADER_VISIBILITY constants_visibility, ID3D12RootSignature** out_signature)
 {
     D3D12_ROOT_PARAMETER parameters[2] = { 0 };
@@ -592,14 +572,15 @@ static int create_root_signature_with(UINT constant_count, D3D12_SHADER_VISIBILI
 }
 
 // The bindless layout (gpu.h) : push constants, then two unbounded tables over the whole heap (one per
-// resource kind, at t0 of their own register space, see photoreal.slang), and the fixed samplers.
+// resource kind, at t0 of their own register space, see render3d_common.slang), and the fixed samplers.
 static int create_gpu_root_signature(void)
 {
     D3D12_DESCRIPTOR_RANGE texture_range = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 1, 0 };
     D3D12_DESCRIPTOR_RANGE buffer_range = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 2, 0 };
     D3D12_DESCRIPTOR_RANGE tlas_range = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, FRAME_COUNT, 0, 3, 0 };
+    D3D12_DESCRIPTOR_RANGE ms_texture_range = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, UINT_MAX, 0, 4, 0 };
 
-    D3D12_ROOT_PARAMETER parameters[4] = { 0 };
+    D3D12_ROOT_PARAMETER parameters[5] = { 0 };
 
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[0].Constants.Num32BitValues = GPU_MAX_PUSH_CONSTANTS / 4;
@@ -619,6 +600,12 @@ static int create_gpu_root_signature(void)
     parameters[3].DescriptorTable.NumDescriptorRanges = 1;
     parameters[3].DescriptorTable.pDescriptorRanges = &tlas_range;
     parameters[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+
+    // The same heap again, seen as multisampled textures.
+    parameters[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[4].DescriptorTable.NumDescriptorRanges = 1;
+    parameters[4].DescriptorTable.pDescriptorRanges = &ms_texture_range;
+    parameters[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     D3D12_STATIC_SAMPLER_DESC samplers[GPU_SAMPLER_COUNT];
 
@@ -649,7 +636,7 @@ static int create_gpu_root_signature(void)
     samplers[GPU_SAMPLER_PANORAMA].AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
 
     D3D12_ROOT_SIGNATURE_DESC desc = {
-        .NumParameters = 4,
+        .NumParameters = 5,
         .pParameters = parameters,
         .NumStaticSamplers = GPU_SAMPLER_COUNT,
         .pStaticSamplers = samplers
@@ -687,7 +674,6 @@ static int create_gpu_root_signature(void)
 static int create_root_signature(void)
 {
     return create_root_signature_with(sizeof(ScreenTransform) / sizeof(float), D3D12_SHADER_VISIBILITY_VERTEX, &root_signature) &&
-        create_root_signature_with(sizeof(MeshConstants) / sizeof(float), D3D12_SHADER_VISIBILITY_ALL, &mesh_root_signature) &&
         create_gpu_root_signature();
 }
 
@@ -761,164 +747,6 @@ static int create_pipeline_state(void)
     }
 
     return 1;
-}
-
-static int create_mesh_pipeline_states(void)
-{
-    size_t vs_size = 0;
-    size_t ps_size = 0;
-    size_t shadow_vs_size = 0;
-
-    uint8_t* vs_code = load_shader("mesh_vs", &vs_size);
-    uint8_t* ps_code = load_shader("mesh_ps", &ps_size);
-    uint8_t* shadow_vs_code = load_shader("mesh_shadow_vs", &shadow_vs_size);
-
-    if (!vs_code || !ps_code || !shadow_vs_code)
-    {
-        printf("Could not load the mesh shaders.\n");
-        SDL_free(vs_code);
-        SDL_free(ps_code);
-        SDL_free(shadow_vs_code);
-        return 0;
-    }
-
-    D3D12_INPUT_ELEMENT_DESC input_elements[3] = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, (UINT)offsetof(MeshVertex, x), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "NORMAL", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, (UINT)offsetof(MeshVertex, nx), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, (UINT)offsetof(MeshVertex, r), D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
-    };
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC desc = { 0 };
-    desc.pRootSignature = mesh_root_signature;
-    desc.VS.pShaderBytecode = vs_code;
-    desc.VS.BytecodeLength = vs_size;
-    desc.PS.pShaderBytecode = ps_code;
-    desc.PS.BytecodeLength = ps_size;
-    desc.InputLayout.pInputElementDescs = input_elements;
-    desc.InputLayout.NumElements = 3;
-    // No culling : imported scenes may have open or single-sided geometry (shadow casters included).
-    desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    desc.RasterizerState.DepthClipEnable = TRUE;
-    desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    desc.DepthStencilState.DepthEnable = TRUE;
-    desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-    desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    desc.SampleMask = UINT_MAX;
-    desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    desc.NumRenderTargets = 1;
-    desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-    desc.SampleDesc.Count = 1;
-
-    HRESULT hr = ID3D12Device_CreateGraphicsPipelineState(device, &desc, &IID_ID3D12PipelineState, (void**)&mesh_pipeline_state);
-
-    if (SUCCEEDED(hr))
-    {
-        // Depth only : no pixel shader, no render target.
-        desc.VS.pShaderBytecode = shadow_vs_code;
-        desc.VS.BytecodeLength = shadow_vs_size;
-        desc.PS.pShaderBytecode = NULL;
-        desc.PS.BytecodeLength = 0;
-        desc.NumRenderTargets = 0;
-        desc.RTVFormats[0] = DXGI_FORMAT_UNKNOWN;
-
-        hr = ID3D12Device_CreateGraphicsPipelineState(device, &desc, &IID_ID3D12PipelineState, (void**)&shadow_pipeline_state);
-    }
-
-    SDL_free(vs_code);
-    SDL_free(ps_code);
-    SDL_free(shadow_vs_code);
-
-    // Sky : vertices generated from the vertex index (no input layout), depth tested at the far
-    // plane (LESS_EQUAL against the cleared 1.0) but never written.
-    size_t sky_vs_size = 0;
-    size_t sky_ps_size = 0;
-    uint8_t* sky_vs_code = load_shader("sky_vs", &sky_vs_size);
-    uint8_t* sky_ps_code = load_shader("sky_ps", &sky_ps_size);
-
-    if (SUCCEEDED(hr) && sky_vs_code && sky_ps_code)
-    {
-        desc.VS.pShaderBytecode = sky_vs_code;
-        desc.VS.BytecodeLength = sky_vs_size;
-        desc.PS.pShaderBytecode = sky_ps_code;
-        desc.PS.BytecodeLength = sky_ps_size;
-        desc.InputLayout.pInputElementDescs = NULL;
-        desc.InputLayout.NumElements = 0;
-        desc.NumRenderTargets = 1;
-        desc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
-        desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL;
-
-        hr = ID3D12Device_CreateGraphicsPipelineState(device, &desc, &IID_ID3D12PipelineState, (void**)&sky_pipeline_state);
-    }
-    else if (SUCCEEDED(hr))
-    {
-        hr = E_FAIL; // sky shaders missing
-    }
-
-    SDL_free(sky_vs_code);
-    SDL_free(sky_ps_code);
-
-    if (FAILED(hr))
-    {
-        printf("Could not create the Direct3D 12 mesh pipeline states.\n");
-        return 0;
-    }
-
-    return 1;
-}
-
-static int create_depth_buffer(void)
-{
-    if (!dsv_heap)
-    {
-        D3D12_DESCRIPTOR_HEAP_DESC heap_desc = { .Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV, .NumDescriptors = 1 };
-
-        if (FAILED(ID3D12Device_CreateDescriptorHeap(device, &heap_desc, &IID_ID3D12DescriptorHeap, (void**)&dsv_heap)))
-        {
-            printf("Could not create the DSV descriptor heap.\n");
-            return 0;
-        }
-
-        ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(dsv_heap, &dsv_handle);
-    }
-
-    D3D12_HEAP_PROPERTIES default_heap = { .Type = D3D12_HEAP_TYPE_DEFAULT };
-
-    D3D12_RESOURCE_DESC desc = {
-        .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-        .Width = swapchain_width,
-        .Height = swapchain_height,
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .Format = DXGI_FORMAT_D32_FLOAT,
-        .SampleDesc.Count = 1,
-        .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        .Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL | D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE
-    };
-
-    D3D12_CLEAR_VALUE clear_value = { .Format = DXGI_FORMAT_D32_FLOAT, .DepthStencil = { 1.0f, 0 } };
-
-    if (FAILED(ID3D12Device_CreateCommittedResource(device, &default_heap, D3D12_HEAP_FLAG_NONE,
-        &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear_value, &IID_ID3D12Resource, (void**)&depth_buffer)))
-    {
-        printf("Could not create the Direct3D 12 depth buffer.\n");
-        return 0;
-    }
-
-    ID3D12Device_CreateDepthStencilView(device, depth_buffer, NULL, dsv_handle);
-
-    return 1;
-}
-
-static void release_depth_buffer(void)
-{
-    if (depth_buffer)
-    {
-        ID3D12Resource_Release(depth_buffer);
-        depth_buffer = NULL;
-    }
 }
 
 static D3D12_CPU_DESCRIPTOR_HANDLE current_rtv_handle(void)
@@ -1096,7 +924,6 @@ static int resize_if_needed(void)
     dx12_wait_renderer_idle();
 
     release_render_targets();
-    release_depth_buffer();
 
     if (FAILED(IDXGISwapChain3_ResizeBuffers(swapchain, FRAME_COUNT, (UINT)width, (UINT)height, DXGI_FORMAT_R8G8B8A8_UNORM, 0)))
     {
@@ -1110,7 +937,7 @@ static int resize_if_needed(void)
 
     DEBUG_LOG("[dx12] swapchain resized: %ux%u\n", swapchain_width, swapchain_height);
 
-    return create_render_targets() && create_depth_buffer();
+    return create_render_targets();
 }
 
 static ID3D12CommandAllocator* upload_allocator;
@@ -1603,11 +1430,6 @@ int dx12_create_renderer(Window* target_window)
         return 0;
     }
 
-    if (!create_depth_buffer())
-    {
-        return 0;
-    }
-
     if (!create_srv_heap())
     {
         return 0;
@@ -1634,11 +1456,6 @@ int dx12_create_renderer(Window* target_window)
     }
 
     if (!create_pipeline_state())
-    {
-        return 0;
-    }
-
-    if (!create_mesh_pipeline_states())
     {
         return 0;
     }
@@ -2111,26 +1928,6 @@ void dx12_destroy_renderer(void)
         ID3D12PipelineState_Release(pipeline_state);
     }
 
-    if (mesh_pipeline_state)
-    {
-        ID3D12PipelineState_Release(mesh_pipeline_state);
-    }
-
-    if (shadow_pipeline_state)
-    {
-        ID3D12PipelineState_Release(shadow_pipeline_state);
-    }
-
-    if (sky_pipeline_state)
-    {
-        ID3D12PipelineState_Release(sky_pipeline_state);
-    }
-
-    if (mesh_root_signature)
-    {
-        ID3D12RootSignature_Release(mesh_root_signature);
-    }
-
     if (gpu_root_signature)
     {
         ID3D12RootSignature_Release(gpu_root_signature);
@@ -2167,13 +1964,6 @@ void dx12_destroy_renderer(void)
             ID3D12Resource_Unmap(gpu_frame_buffers[i], 0, NULL);
             ID3D12Resource_Release(gpu_frame_buffers[i]);
         }
-    }
-
-    release_depth_buffer();
-
-    if (dsv_heap)
-    {
-        ID3D12DescriptorHeap_Release(dsv_heap);
     }
 
     if (root_signature)
@@ -2394,208 +2184,6 @@ void dx12_destroy_mesh(Mesh* mesh)
     DEBUG_LOG("[dx12] mesh destroyed\n");
 }
 
-ShadowMap* dx12_create_shadow_map(int size)
-{
-    ShadowMap* shadow_map = SDL_calloc(1, sizeof(ShadowMap));
-    shadow_map->size = size;
-
-    D3D12_HEAP_PROPERTIES default_heap = { .Type = D3D12_HEAP_TYPE_DEFAULT };
-
-    D3D12_RESOURCE_DESC desc = {
-        .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
-        .Width = (UINT64)size,
-        .Height = (UINT)size,
-        .DepthOrArraySize = 1,
-        .MipLevels = 1,
-        .Format = DXGI_FORMAT_R32_TYPELESS,
-        .SampleDesc.Count = 1,
-        .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
-        .Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL
-    };
-
-    D3D12_CLEAR_VALUE clear_value = { .Format = DXGI_FORMAT_D32_FLOAT, .DepthStencil = { 1.0f, 0 } };
-
-    // Resting state : readable like any texture (as render targets do), DEPTH_WRITE only during
-    // begin_shadow_pass()/end_shadow_pass().
-    if (FAILED(ID3D12Device_CreateCommittedResource(device, &default_heap, D3D12_HEAP_FLAG_NONE,
-        &desc, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear_value, &IID_ID3D12Resource, (void**)&shadow_map->texture.resource)))
-    {
-        printf("Could not create a Direct3D 12 shadow map resource.\n");
-        SDL_free(shadow_map);
-        return NULL;
-    }
-
-    D3D12_DESCRIPTOR_HEAP_DESC heap_desc = { .Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV, .NumDescriptors = 1 };
-
-    if (FAILED(ID3D12Device_CreateDescriptorHeap(device, &heap_desc, &IID_ID3D12DescriptorHeap, (void**)&shadow_map->dsv_heap)))
-    {
-        printf("Could not create a Direct3D 12 shadow map DSV heap.\n");
-        ID3D12Resource_Release(shadow_map->texture.resource);
-        SDL_free(shadow_map);
-        return NULL;
-    }
-
-    ID3D12DescriptorHeap_GetCPUDescriptorHandleForHeapStart(shadow_map->dsv_heap, &shadow_map->dsv_handle);
-
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {
-        .Format = DXGI_FORMAT_D32_FLOAT,
-        .ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D
-    };
-    ID3D12Device_CreateDepthStencilView(device, shadow_map->texture.resource, &dsv_desc, shadow_map->dsv_handle);
-
-    D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {
-        .Format = DXGI_FORMAT_R32_FLOAT,
-        .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
-        .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-        .Texture2D.MipLevels = 1
-    };
-
-    shadow_map->texture.srv_index = allocate_srv_index();
-    ID3D12Device_CreateShaderResourceView(device, shadow_map->texture.resource, &srv_desc, srv_cpu_handle(shadow_map->texture.srv_index));
-
-    DEBUG_LOG("[dx12] shadow map created: %dx%d\n", size, size);
-
-    return shadow_map;
-}
-
-void dx12_destroy_shadow_map(ShadowMap* shadow_map)
-{
-    release_srv_index(shadow_map->texture.srv_index);
-    ID3D12DescriptorHeap_Release(shadow_map->dsv_heap);
-    ID3D12Resource_Release(shadow_map->texture.resource);
-    SDL_free(shadow_map);
-
-    DEBUG_LOG("[dx12] shadow map destroyed\n");
-}
-
-static void transition_shadow_map(ShadowMap* shadow_map, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
-{
-    D3D12_RESOURCE_BARRIER barrier = { 0 };
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = shadow_map->texture.resource;
-    barrier.Transition.StateBefore = before;
-    barrier.Transition.StateAfter = after;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    ID3D12GraphicsCommandList_ResourceBarrier(active_command_list, 1, &barrier);
-}
-
-// Recorded into the render-target command list : like a render-target pass, a synchronous unit of
-// work of its own (end_shadow_pass() submits and waits on it).
-int dx12_begin_shadow_pass(ShadowMap* shadow_map, const float light_view_projection[16])
-{
-    if (FAILED(ID3D12CommandAllocator_Reset(render_target_allocator)))
-    {
-        return 0;
-    }
-
-    if (FAILED(ID3D12GraphicsCommandList_Reset(render_target_command_list, render_target_allocator, shadow_pipeline_state)))
-    {
-        return 0;
-    }
-
-    active_command_list = render_target_command_list;
-    active_shadow_map = shadow_map;
-
-    ID3D12GraphicsCommandList_SetGraphicsRootSignature(active_command_list, mesh_root_signature);
-    ID3D12GraphicsCommandList_IASetPrimitiveTopology(active_command_list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-
-    D3D12_VIEWPORT viewport = {
-        .Width = (float)shadow_map->size,
-        .Height = (float)shadow_map->size,
-        .MinDepth = 0.0f,
-        .MaxDepth = 1.0f
-    };
-    ID3D12GraphicsCommandList_RSSetViewports(active_command_list, 1, &viewport);
-
-    D3D12_RECT scissor_rect = { 0, 0, (LONG)shadow_map->size, (LONG)shadow_map->size };
-    ID3D12GraphicsCommandList_RSSetScissorRects(active_command_list, 1, &scissor_rect);
-
-    transition_shadow_map(shadow_map, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-
-    ID3D12GraphicsCommandList_OMSetRenderTargets(active_command_list, 0, NULL, FALSE, &shadow_map->dsv_handle);
-    ID3D12GraphicsCommandList_ClearDepthStencilView(active_command_list, shadow_map->dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
-
-    mesh_constants_for_shadow_pass(&mesh_constants, light_view_projection);
-
-    return 1;
-}
-
-void dx12_end_shadow_pass(void)
-{
-    transition_shadow_map(active_shadow_map, D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-
-    ID3D12GraphicsCommandList_Close(active_command_list);
-
-    ID3D12CommandList* lists[] = { (ID3D12CommandList*)active_command_list };
-    ID3D12CommandQueue_ExecuteCommandLists(command_queue, 1, lists);
-
-    dx12_wait_renderer_idle();
-
-    active_shadow_map = NULL;
-}
-
-void dx12_begin_scene(const SceneLighting* lighting, ShadowMap* shadow_map)
-{
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = current_rtv_handle();
-
-    ID3D12GraphicsCommandList_SetPipelineState(command_list, mesh_pipeline_state);
-    ID3D12GraphicsCommandList_SetGraphicsRootSignature(command_list, mesh_root_signature);
-
-    ID3D12GraphicsCommandList_OMSetRenderTargets(command_list, 1, &rtv_handle, FALSE, &dsv_handle);
-    ID3D12GraphicsCommandList_ClearDepthStencilView(command_list, dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
-
-    // Without a shadow map, the white texture stands in : a stored depth of 1 never occludes.
-    Texture* shadow_texture = shadow_map ? &shadow_map->texture : &built_in_white_texture;
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 1, srv_gpu_handle(shadow_texture->srv_index));
-    scene_pass_texture = shadow_texture;
-
-    mesh_constants_for_scene(&mesh_constants, lighting, shadow_map ? shadow_map->size : 0);
-}
-
-void dx12_end_scene(void)
-{
-    // Back to the 2D state record_commands() set up : sprite pipeline + root signature (whose
-    // root constants switching signatures invalidated), and no depth buffer bound, since the
-    // sprite pipeline state declares none.
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = current_rtv_handle();
-
-    ID3D12GraphicsCommandList_SetPipelineState(command_list, pipeline_state);
-    ID3D12GraphicsCommandList_SetGraphicsRootSignature(command_list, root_signature);
-
-    ScreenTransform transform = screen_transform_for_size((float)swapchain_width, (float)swapchain_height);
-    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 0, sizeof(transform) / sizeof(float), &transform, 0);
-
-    ID3D12GraphicsCommandList_OMSetRenderTargets(command_list, 1, &rtv_handle, FALSE, NULL);
-}
-
-void dx12_draw_mesh(Mesh* mesh, const float model[16], int first_index, int index_count)
-{
-    SDL_memcpy(mesh_constants.model, model, sizeof(mesh_constants.model));
-    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(active_command_list, 0,
-        sizeof(mesh_constants) / sizeof(float), &mesh_constants, 0);
-
-    ID3D12GraphicsCommandList_IASetVertexBuffers(active_command_list, 0, 1, &mesh->vertex_view);
-    ID3D12GraphicsCommandList_IASetIndexBuffer(active_command_list, &mesh->index_view);
-    UINT count = index_count < 0 ? mesh->index_count : (UINT)index_count;
-    ID3D12GraphicsCommandList_DrawIndexedInstanced(active_command_list, count, 1, (UINT)first_index, 0, 0);
-}
-
-void dx12_draw_skybox(Texture* equirectangular, float intensity)
-{
-    MeshConstants sky_constants;
-    mesh_constants_for_sky(&sky_constants, mesh_constants.view_projection, intensity);
-
-    ID3D12GraphicsCommandList_SetPipelineState(command_list, sky_pipeline_state);
-    ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 0, sizeof(sky_constants) / sizeof(float), &sky_constants, 0);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 1, srv_gpu_handle(equirectangular->srv_index));
-    ID3D12GraphicsCommandList_DrawInstanced(command_list, 3, 1, 0, 0);
-
-    // Back to the scene's state, so draw_mesh() keeps working after the sky (each draw_mesh()
-    // re-pushes the whole constant block, so only the pipeline and texture need restoring).
-    ID3D12GraphicsCommandList_SetPipelineState(command_list, mesh_pipeline_state);
-    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 1, srv_gpu_handle(scene_pass_texture->srv_index));
-}
-
 // --- GPU layer (gpu.h) -------------------------------------------------------------------------
 
 // Depth textures are typeless so they can be both a depth target and sampled.
@@ -2609,26 +2197,22 @@ static DXGI_FORMAT to_dxgi_format(GpuFormat format)
     case GPU_FORMAT_RGBA32F: return DXGI_FORMAT_R32G32B32A32_FLOAT;
     case GPU_FORMAT_RG16F: return DXGI_FORMAT_R16G16_FLOAT;
     case GPU_FORMAT_R16F: return DXGI_FORMAT_R16_FLOAT;
+    case GPU_FORMAT_R32F: return DXGI_FORMAT_R32_FLOAT;
     case GPU_FORMAT_R8: return DXGI_FORMAT_R8_UNORM;
     case GPU_FORMAT_D32: return DXGI_FORMAT_D32_FLOAT;
+    case GPU_FORMAT_BC1: return DXGI_FORMAT_BC1_UNORM;
+    case GPU_FORMAT_BC1_SRGB: return DXGI_FORMAT_BC1_UNORM_SRGB;
+    case GPU_FORMAT_BC3: return DXGI_FORMAT_BC3_UNORM;
+    case GPU_FORMAT_BC3_SRGB: return DXGI_FORMAT_BC3_UNORM_SRGB;
+    case GPU_FORMAT_BC5: return DXGI_FORMAT_BC5_UNORM;
     default: return DXGI_FORMAT_UNKNOWN;
     }
 }
 
-static UINT format_pixel_size(GpuFormat format)
+// Direct3D 12 always samples BC formats.
+int dx12_gpu_format_supported(GpuFormat format)
 {
-    switch (format)
-    {
-    case GPU_FORMAT_RGBA8:
-    case GPU_FORMAT_RGBA8_SRGB:
-    case GPU_FORMAT_RG16F:
-    case GPU_FORMAT_D32: return 4;
-    case GPU_FORMAT_RGBA16F: return 8;
-    case GPU_FORMAT_RGBA32F: return 16;
-    case GPU_FORMAT_R16F: return 2;
-    case GPU_FORMAT_R8: return 1;
-    default: return 0;
-    }
+    return to_dxgi_format(format) != DXGI_FORMAT_UNKNOWN;
 }
 
 int dx12_gpu_supported(void)
@@ -2646,6 +2230,7 @@ Texture* dx12_gpu_create_texture(const GpuTextureDesc* desc)
     texture->width = (UINT)desc->width;
     texture->height = (UINT)desc->height;
     texture->is_depth = desc->format == GPU_FORMAT_D32;
+    texture->samples = (UINT)SDL_max(1, desc->samples);
 
     DXGI_FORMAT format = to_dxgi_format(desc->format);
     D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
@@ -2669,7 +2254,7 @@ Texture* dx12_gpu_create_texture(const GpuTextureDesc* desc)
         .DepthOrArraySize = 1,
         .MipLevels = (UINT16)desc->mip_count,
         .Format = texture->is_depth ? DXGI_FORMAT_R32_TYPELESS : format,
-        .SampleDesc.Count = 1,
+        .SampleDesc.Count = texture->samples,
         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
         .Flags = flags
     };
@@ -2723,18 +2308,15 @@ Texture* dx12_gpu_create_texture(const GpuTextureDesc* desc)
         uint8_t* mapped = NULL;
         ID3D12Resource_Map(upload_buffer, 0, &no_read_range, (void**)&mapped);
 
-        UINT pixel_size = format_pixel_size(desc->format);
-
+        // Row by row : rows of blocks for compressed formats (row_counts and row_sizes say so).
         for (int mip = 0; mip < desc->mip_count; mip++)
         {
-            UINT mip_width = SDL_max(1u, texture->width >> mip);
-            UINT mip_height = SDL_max(1u, texture->height >> mip);
             const uint8_t* source = (const uint8_t*)desc->mips[mip];
 
-            for (UINT row = 0; row < mip_height; row++)
+            for (UINT row = 0; row < row_counts[mip]; row++)
             {
                 SDL_memcpy(mapped + layouts[mip].Offset + (size_t)row * layouts[mip].Footprint.RowPitch,
-                    source + (size_t)row * mip_width * pixel_size, (size_t)mip_width * pixel_size);
+                    source + (size_t)row * (size_t)row_sizes[mip], (size_t)row_sizes[mip]);
             }
         }
 
@@ -2778,11 +2360,12 @@ Texture* dx12_gpu_create_texture(const GpuTextureDesc* desc)
         ID3D12Resource_Release(upload_buffer);
     }
 
+    // Multisampled : a Texture2DMS view, read through g_textures_ms (t0 space4) rather than g_textures.
     D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {
         .Format = texture->is_depth ? DXGI_FORMAT_R32_FLOAT : format,
-        .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
+        .ViewDimension = texture->samples > 1 ? D3D12_SRV_DIMENSION_TEXTURE2DMS : D3D12_SRV_DIMENSION_TEXTURE2D,
         .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
-        .Texture2D.MipLevels = (UINT)desc->mip_count
+        .Texture2D.MipLevels = texture->samples > 1 ? 0 : (UINT)desc->mip_count
     };
 
     texture->srv_index = allocate_srv_index();
@@ -2806,7 +2389,10 @@ Texture* dx12_gpu_create_texture(const GpuTextureDesc* desc)
 
         if (texture->is_depth)
         {
-            D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = { .Format = DXGI_FORMAT_D32_FLOAT, .ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D };
+            D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {
+                .Format = DXGI_FORMAT_D32_FLOAT,
+                .ViewDimension = texture->samples > 1 ? D3D12_DSV_DIMENSION_TEXTURE2DMS : D3D12_DSV_DIMENSION_TEXTURE2D
+            };
             ID3D12Device_CreateDepthStencilView(device, texture->resource, &dsv_desc, texture->target_handle);
         }
         else
@@ -2821,6 +2407,95 @@ Texture* dx12_gpu_create_texture(const GpuTextureDesc* desc)
 uint32_t dx12_gpu_texture_index(Texture* texture)
 {
     return texture->srv_index;
+}
+
+int dx12_gpu_read_texture(Texture* texture, void* out_pixels, size_t size)
+{
+    if (texture->is_depth || texture->samples > 1)
+    {
+        return 0;
+    }
+
+    D3D12_RESOURCE_DESC desc;
+    ID3D12Resource_GetDesc(texture->resource, &desc);
+
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
+    UINT rows = 0;
+    UINT64 row_size = 0;
+    UINT64 total = 0;
+    ID3D12Device_GetCopyableFootprints(device, &desc, 0, 1, 0, &footprint, &rows, &row_size, &total);
+
+    if (size < (size_t)row_size * rows)
+    {
+        return 0;
+    }
+
+    dx12_wait_renderer_idle();
+
+    // Rows land 256-byte aligned in the readback buffer ; copied out tightly packed.
+    D3D12_HEAP_PROPERTIES readback_heap = { .Type = D3D12_HEAP_TYPE_READBACK };
+    D3D12_RESOURCE_DESC buffer_desc = {
+        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Width = total,
+        .Height = 1,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .Format = DXGI_FORMAT_UNKNOWN,
+        .SampleDesc.Count = 1,
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR
+    };
+
+    ID3D12Resource* readback = NULL;
+
+    if (FAILED(ID3D12Device_CreateCommittedResource(device, &readback_heap, D3D12_HEAP_FLAG_NONE, &buffer_desc,
+        D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource, (void**)&readback)))
+    {
+        return 0;
+    }
+
+    ID3D12CommandAllocator_Reset(upload_allocator);
+    ID3D12GraphicsCommandList_Reset(upload_command_list, upload_allocator, NULL);
+
+    D3D12_RESOURCE_BARRIER barrier = { 0 };
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = texture->resource;
+    barrier.Transition.StateBefore = SHADER_READ_STATE;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    ID3D12GraphicsCommandList_ResourceBarrier(upload_command_list, 1, &barrier);
+
+    D3D12_TEXTURE_COPY_LOCATION destination = { .pResource = readback, .Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, .PlacedFootprint = footprint };
+    D3D12_TEXTURE_COPY_LOCATION source = { .pResource = texture->resource, .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, .SubresourceIndex = 0 };
+    ID3D12GraphicsCommandList_CopyTextureRegion(upload_command_list, &destination, 0, 0, 0, &source, NULL);
+
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.StateAfter = SHADER_READ_STATE;
+    ID3D12GraphicsCommandList_ResourceBarrier(upload_command_list, 1, &barrier);
+    ID3D12GraphicsCommandList_Close(upload_command_list);
+
+    ID3D12CommandList* lists[] = { (ID3D12CommandList*)upload_command_list };
+    ID3D12CommandQueue_ExecuteCommandLists(command_queue, 1, lists);
+    dx12_wait_renderer_idle();
+
+    uint8_t* mapped = NULL;
+    D3D12_RANGE read_range = { 0, (SIZE_T)total };
+
+    if (FAILED(ID3D12Resource_Map(readback, 0, &read_range, (void**)&mapped)))
+    {
+        ID3D12Resource_Release(readback);
+        return 0;
+    }
+
+    for (UINT row = 0; row < rows; row++)
+    {
+        SDL_memcpy((uint8_t*)out_pixels + (size_t)row * (size_t)row_size, mapped + footprint.Offset + (size_t)row * footprint.Footprint.RowPitch, (size_t)row_size);
+    }
+
+    D3D12_RANGE no_write = { 0, 0 };
+    ID3D12Resource_Unmap(readback, 0, &no_write);
+    ID3D12Resource_Release(readback);
+
+    return 1;
 }
 
 GpuBuffer* dx12_gpu_create_buffer(const void* data, size_t size)
@@ -2942,12 +2617,12 @@ GpuPipeline* dx12_gpu_create_pipeline(const GpuPipelineDesc* desc)
     state.RasterizerState.SlopeScaledDepthBias = desc->depth_bias_slope;
     state.DepthStencilState.DepthEnable = desc->depth_test || desc->depth_write;
     state.DepthStencilState.DepthWriteMask = desc->depth_write ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-    state.DepthStencilState.DepthFunc = desc->depth_test ? D3D12_COMPARISON_FUNC_LESS_EQUAL : D3D12_COMPARISON_FUNC_ALWAYS;
+    state.DepthStencilState.DepthFunc = desc->depth_test && !desc->depth_always ? D3D12_COMPARISON_FUNC_LESS_EQUAL : D3D12_COMPARISON_FUNC_ALWAYS;
     state.DSVFormat = to_dxgi_format(desc->depth_format);
     state.SampleMask = UINT_MAX;
     state.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
     state.NumRenderTargets = (UINT)desc->color_count;
-    state.SampleDesc.Count = 1;
+    state.SampleDesc.Count = (UINT)SDL_max(1, desc->samples);
 
     for (int i = 0; i < desc->color_count; i++)
     {
@@ -2955,8 +2630,9 @@ GpuPipeline* dx12_gpu_create_pipeline(const GpuPipelineDesc* desc)
         state.RTVFormats[i] = to_dxgi_format(desc->color_formats[i]);
         blend->RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
         blend->BlendEnable = desc->blend != GPU_BLEND_NONE;
-        blend->SrcBlend = desc->blend == GPU_BLEND_ADD ? D3D12_BLEND_ONE : D3D12_BLEND_SRC_ALPHA;
-        blend->DestBlend = desc->blend == GPU_BLEND_ADD ? D3D12_BLEND_ONE : D3D12_BLEND_INV_SRC_ALPHA;
+        blend->SrcBlend = desc->blend == GPU_BLEND_ALPHA ? D3D12_BLEND_SRC_ALPHA : D3D12_BLEND_ONE;
+        blend->DestBlend = desc->blend == GPU_BLEND_ADD ? D3D12_BLEND_ONE :
+            desc->blend == GPU_BLEND_ATTENUATE ? D3D12_BLEND_SRC_ALPHA : D3D12_BLEND_INV_SRC_ALPHA;
         blend->BlendOp = D3D12_BLEND_OP_ADD;
         blend->SrcBlendAlpha = D3D12_BLEND_ONE;
         blend->DestBlendAlpha = D3D12_BLEND_ONE;
@@ -3051,6 +2727,7 @@ void dx12_gpu_begin_pass(const GpuPassDesc* pass)
     ID3D12GraphicsCommandList_SetGraphicsRootSignature(command_list, gpu_root_signature);
     ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 1, srv_gpu_handle(0));
     ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 2, srv_gpu_handle(0));
+    ID3D12GraphicsCommandList_SetGraphicsRootDescriptorTable(command_list, 4, srv_gpu_handle(0));
 
     if (rt_device)
     {
@@ -3098,6 +2775,15 @@ void dx12_gpu_bind_pipeline(GpuPipeline* pipeline)
     ID3D12GraphicsCommandList_SetPipelineState(command_list, pipeline->state);
 }
 
+void dx12_gpu_set_viewport(int x, int y, int width, int height)
+{
+    D3D12_VIEWPORT viewport = { (float)x, (float)y, (float)width, (float)height, 0.0f, 1.0f };
+    ID3D12GraphicsCommandList_RSSetViewports(command_list, 1, &viewport);
+
+    D3D12_RECT scissor_rect = { x, y, x + width, y + height };
+    ID3D12GraphicsCommandList_RSSetScissorRects(command_list, 1, &scissor_rect);
+}
+
 void dx12_gpu_push_constants(const void* data, int size)
 {
     ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(command_list, 0, (UINT)size / 4, data, 0);
@@ -3130,13 +2816,25 @@ static void uav_barrier(ID3D12GraphicsCommandList* list, ID3D12Resource* resourc
 // The structure for this range of the mesh's triangles, built the first time it's needed.
 static const Blas* ensure_blas(Mesh* mesh, UINT first_index, UINT index_count)
 {
+    // The same ranges come in the same order every frame : the one after the last found first.
+    int hint = mesh->blas_hint;
+
+    if (hint < mesh->blas_count && mesh->blas[hint].first_index == first_index && mesh->blas[hint].index_count == index_count)
+    {
+        mesh->blas_hint = hint + 1;
+        return &mesh->blas[hint];
+    }
+
     for (int i = 0; i < mesh->blas_count; i++)
     {
         if (mesh->blas[i].first_index == first_index && mesh->blas[i].index_count == index_count)
         {
+            mesh->blas_hint = i + 1;
             return &mesh->blas[i];
         }
     }
+
+    mesh->blas_hint = mesh->blas_count + 1; // where the one built now will be
 
     D3D12_RAYTRACING_GEOMETRY_DESC geometry = {
         .Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES,
@@ -3273,17 +2971,10 @@ static const RendererBackend dx12_backend = {
     .set_scissor = dx12_set_scissor,
     .create_mesh = dx12_create_mesh,
     .destroy_mesh = dx12_destroy_mesh,
-    .create_shadow_map = dx12_create_shadow_map,
-    .destroy_shadow_map = dx12_destroy_shadow_map,
-    .begin_shadow_pass = dx12_begin_shadow_pass,
-    .end_shadow_pass = dx12_end_shadow_pass,
-    .begin_scene = dx12_begin_scene,
-    .end_scene = dx12_end_scene,
-    .draw_mesh = dx12_draw_mesh,
-    .draw_skybox = dx12_draw_skybox,
     .gpu_supported = dx12_gpu_supported,
     .gpu_create_texture = dx12_gpu_create_texture,
     .gpu_texture_index = dx12_gpu_texture_index,
+    .gpu_read_texture = dx12_gpu_read_texture,
     .gpu_create_buffer = dx12_gpu_create_buffer,
     .gpu_destroy_buffer = dx12_gpu_destroy_buffer,
     .gpu_buffer_index = dx12_gpu_buffer_index,
@@ -3296,9 +2987,11 @@ static const RendererBackend dx12_backend = {
     .gpu_end_pass = dx12_gpu_end_pass,
     .gpu_bind_pipeline = dx12_gpu_bind_pipeline,
     .gpu_push_constants = dx12_gpu_push_constants,
+    .gpu_set_viewport = dx12_gpu_set_viewport,
     .gpu_draw = dx12_gpu_draw,
     .gpu_draw_indexed = dx12_gpu_draw_indexed,
     .gpu_raytracing_supported = dx12_gpu_raytracing_supported,
+    .gpu_format_supported = dx12_gpu_format_supported,
     .gpu_build_ray_scene = dx12_gpu_build_ray_scene
 };
 

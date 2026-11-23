@@ -6,8 +6,11 @@ both backends:
 | File | Contents |
 | --- | --- |
 | `sprite.slang` | 2D (`draw_vertices`): one vertex and one fragment shader. |
-| `mesh.slang` | Forward 3D: shadow pass, scene pass, sky. |
-| `photoreal.slang` | The photorealistic renderer. |
+| `render3d_common.slang` | Included by the 3D shaders: bindless tables, per-frame and per-object data, lights, shadows, sky and clouds, probes, materials and the whole lighting model. |
+| `render3d.slang` | The passes both 3D pipelines share: shadows, sky, AO, MSAA resolves, volumetrics, TAA, bloom, tone mapping, FXAA, sharpening. |
+| `forward_plus.slang` | Forward+: the prepass and shading pass. |
+| `deferred_plus.slang` | Deferred+: the visibility buffer, its shading, screen-space reflections. |
+| `realtime_gi.slang` | Realtime GI's probes, with ray queries (`ps_6_5`). |
 
 ## Compilation
 
@@ -22,7 +25,9 @@ both backends:
   Slang's own DXIL backend isn't used, because it needs `dxcompiler.dll`, which Slang's release
   archives don't ship.
 
-`pireneus_copy_shaders(<target>)` copies the result next to an executable.
+`pireneus_copy_shaders(<target>)` copies the result next to an executable, on every build (a change to
+shaders alone is deployed too). Every entry point depends on every `.slang` file, since they include
+each other.
 
 To add an entry point, add a line to `PIRENEUS_SHADER_ENTRY_POINTS`:
 
@@ -41,10 +46,9 @@ warns that no shader gets compiled.
   constants (register `b0`) on DX12.
 - **Matrices** arrive as four **row** `float4`s, applied with explicit `dot()`s. Their memory layout
   is therefore unambiguous between SPIR-V and HLSL.
-- **2D and forward 3D** use one combined texture (`t0`/`s0`). In `mesh.slang`, `pass_texture` is the
-  shadow map during the scene pass, and the panorama during the sky pass.
-- **Photorealistic**: bindless textures and buffers, plus four fixed samplers declared as separate
-  variables (`g_sampler_point`, `g_sampler_linear`, `g_sampler_anisotropic`, `g_sampler_panorama`).
-  A D3D12 static sampler can't back an array.
-- **Shared structures**: the structs shared with C (`mesh_constants.h`, and `Frame` and `Instance` in
-  `photoreal.c`) mirror them exactly.
+- **2D** uses one combined texture (`t0`/`s0`).
+- **3D**: bindless textures, multisampled textures and buffers, plus four fixed samplers declared as
+  separate variables (`g_sampler_point`, `g_sampler_linear`, `g_sampler_anisotropic`,
+  `g_sampler_panorama`). A D3D12 static sampler can't back an array.
+- **Shared structures**: the structs shared with C (`Frame`, `Instance`, `Light`... in
+  `render3d_internal.h`) mirror them exactly.

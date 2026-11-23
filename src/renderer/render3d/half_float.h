@@ -56,4 +56,45 @@ static inline uint16_t float_to_half(float value)
     return (uint16_t)half;
 }
 
+static inline float half_to_float(uint16_t value)
+{
+    uint32_t sign = (uint32_t)(value & 0x8000u) << 16;
+    uint32_t exponent = (value >> 10) & 0x1Fu;
+    uint32_t mantissa = value & 0x3FFu;
+    uint32_t bits;
+
+    if (exponent == 0)
+    {
+        if (mantissa == 0)
+        {
+            bits = sign;
+        }
+        else
+        {
+            // Subnormal : normalized for the wider exponent.
+            int shift = 0;
+
+            while ((mantissa & 0x400u) == 0)
+            {
+                mantissa <<= 1;
+                shift++;
+            }
+
+            bits = sign | ((uint32_t)(127 - 15 + 1 - shift) << 23) | ((mantissa & 0x3FFu) << 13);
+        }
+    }
+    else if (exponent == 31)
+    {
+        bits = sign | 0x7F800000u | (mantissa << 13);
+    }
+    else
+    {
+        bits = sign | ((exponent + 127 - 15) << 23) | (mantissa << 13);
+    }
+
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
 #endif // _HALF_FLOAT_H_

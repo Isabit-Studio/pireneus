@@ -13,7 +13,8 @@ extern "C" {
 // A 3D model file (FBX, OBJ through ufbx ; glTF 2.0, GLB through cgltf) flattened into one static,
 // indexed triangle list ready for create_mesh() : every mesh node is triangulated and baked into model
 // space (node transforms applied), in the engine's convention (right-handed, +Y up, 1 unit = 1 meter,
-// whatever axes/units the file was exported with). Triangles are grouped by material into submeshes.
+// whatever axes/units the file was exported with). Triangles are grouped by material into submeshes ; an
+// FBX file's also by regions of space, so that a large scene's submeshes can be culled.
 
 #define MODEL_NO_TEXTURE (-1)
 
@@ -40,6 +41,7 @@ typedef struct
     int metallic_roughness_texture; // glTF convention : G = roughness, B = metallic
     int emissive_texture;
     int occlusion_texture;     // R = occlusion
+    int alpha_from_texture;    // no alpha mode in the file : cut out where the base color's alpha says so
 } ModelMaterial;
 
 typedef struct
@@ -47,6 +49,7 @@ typedef struct
     int first_index;
     int index_count;
     int material;              // index into ModelData::materials
+    float bounds[6];           // its box : min xyz, max xyz
 } ModelSubmesh;
 
 typedef struct

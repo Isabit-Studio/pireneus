@@ -28,7 +28,8 @@ pireneus (static library, C)         pireneus_imgui (C++)          pireneus-exam
 | Module | Role |
 | --- | --- |
 | `src/platforms` | Platform abstraction. Window and event loop (`platforms_window.h`), keyboard by scancode (`platforms_input.h`), user folders (`platforms_paths.h`). SDL3 (`sdl/`) and UWP (`uwp/`) implementations. |
-| `src/renderer` | The RHI (`renderer.h`) and its dispatch to the backends (`renderer.c`, `renderer_backend.h`). The `vulkan/` and `dx12/` backends, the bindless GPU layer (`gpu.h`), the sprite batch, the Slang shaders and the photorealistic renderer (`photoreal/`). |
+| `src/renderer` | The RHI (`renderer.h`) and its dispatch to the backends (`renderer.c`, `renderer_backend.h`). The `vulkan/` and `dx12/` backends, the bindless GPU layer (`gpu.h`), the sprite batch, the Slang shaders, the 2D renderer (`render2d/`) and the 3D renderer, Forward+ and Deferred+ (`render3d/`). |
+| `src/bake` | Baked lighting: lightmaps, the probe volume, occlusion culling, on the CPU. |
 | `src/math` | Header-only 3D math (`math3d.h`): `Vec3`, row-major `Mat4`, projections. |
 | `src/json` | Hand-written JSON reader. |
 | `src/tiled` | Tiled maps (loading, editing, saving) and culled drawing. |

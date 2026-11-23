@@ -6,23 +6,27 @@ add_executable(pireneus-examples
     2d-test/main.c
     pixel-perfect/main.c
     tilemap-editor/main.cpp
-    3d-test/main.c
-    photoreal/main.c
+    render3d/main.c
     scene-editor/main.cpp
     scene-editor/panels.cpp
     scene-editor/asset_browser.cpp
     scene-editor/level_editor.cpp
+    scene-editor/lighting.cpp
     scene-editor/profiler.cpp
 )
 target_include_directories(pireneus-examples PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pireneus-examples PRIVATE pireneus_imgui imguizmo)
 pireneus_copy_shaders(pireneus-examples)
 
+# The demo projects (demos/) are opened where they are, in the source tree : their assets are large.
+if(NOT PIRENEUS_UWP)
+    target_compile_definitions(pireneus-examples PRIVATE PIRENEUS_DEMOS_DIRECTORY="${CMAKE_SOURCE_DIR}/demos/")
+endif()
+
 # The resources the examples load at runtime, and the Lucide icon font (+ its ISC license notice).
 add_custom_command(TARGET pireneus-examples POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_SOURCE_DIR}/resources
-        $<TARGET_FILE_DIR:pireneus-examples>/resources
+    COMMAND ${CMAKE_COMMAND} -DSOURCE=${CMAKE_SOURCE_DIR}/resources -DDESTINATION=$<TARGET_FILE_DIR:pireneus-examples>/resources
+        -P ${CMAKE_SOURCE_DIR}/cmake/copy_resources.cmake
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:pireneus-examples>/resources/fonts
     COMMAND ${CMAKE_COMMAND} -E copy ${PIRENEUS_LUCIDE_FONT} $<TARGET_FILE_DIR:pireneus-examples>/resources/fonts/lucide.ttf
     COMMAND ${CMAKE_COMMAND} -E copy ${PIRENEUS_LUCIDE_LICENSE} $<TARGET_FILE_DIR:pireneus-examples>/resources/fonts/lucide-LICENSE.txt

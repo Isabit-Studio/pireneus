@@ -10,7 +10,7 @@
 
 <p align="center">
   A 2D / 3D game engine written in <b>Orthodox C++</b>, by <b>Isabit Studio</b>.<br>
-  Vulkan and DirectX 12 · photorealistic rendering · scene and level editor · Box2D / Box3D physics.
+  Vulkan and DirectX 12 · Forward+ and Deferred+ · baked lighting · scene and level editor · Box2D / Box3D physics.
 </p>
 
 ---
@@ -26,9 +26,15 @@ What it includes:
 
 - **Rendering**: a minimal RHI with two backends, **Vulkan** and **DirectX 12**. Both are compiled into
   the same binary, and one is picked at startup. On top of it:
-  - batched 2D rendering, with an API inspired by XNA / MonoGame;
-  - a forward 3D renderer with shadows;
-  - a **photorealistic renderer**: visibility buffer, PBR, IBL, GTAO, bloom, tone mapping.
+  - batched 2D rendering, with an API inspired by XNA / MonoGame, and a 2D renderer with a pixel-perfect
+    mode;
+  - two 3D pipelines sharing physically based materials, lighting and post-processing:
+    - **Forward+**, built to rely on baked lighting: depth prepass, MSAA;
+    - **Deferred+**: visibility buffer, sharp TAA, screen-space reflections, realtime ray-traced GI;
+    - and in both: unlimited clustered lights with cached shadows, cascaded soft shadows, GTAO,
+      procedural clouds, volumetric fog, reflection probes, bloom, tone mapping, FXAA, sharpening.
+- **Baked lighting**: lightmaps (path traced, several bounces), an adaptive probe volume, occlusion
+  culling, reflection probes.
 - **Shaders**: a single [Slang](https://shader-slang.org/) source for both backends (SPIR-V and DXIL).
 - **Platforms**: Windows (Win32 through SDL3, and UWP with a custom CoreWindow backend). The
   architecture is ready for Linux and macOS (see [platform status](docs/Platforms-and-Input.md)).
@@ -37,7 +43,7 @@ What it includes:
   | Kind | Formats |
   | --- | --- |
   | Models | FBX, OBJ, glTF |
-  | Textures | PNG, JPEG, TGA, BMP |
+  | Textures | PNG, JPEG, TGA, BMP, DDS (BC1, BC3, BC5) |
   | Skies | HDR, EXR |
   | Maps | Tiled |
   | Sounds | WAV, AIFF, MP3, FLAC, Ogg |
@@ -98,13 +104,17 @@ build/examples/pireneus-examples.exe
 ```
 
 On Windows, a dialog first asks for the graphics backend (Enter picks the default). Then a menu opens:
-you can create or open a project, or start an example.
+you can create or open a project, open a demo project, or start an example.
+
+The **Bistro** demo (`demos/Bistro`) needs Amazon Lumberyard Bistro, which isn't in the repository:
+download it from [NVIDIA ORCA](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) and extract
+`Bistro_v5_2` into `resources/3D-test/`. See [Demo scenes](docs/Demo-Scenes.md).
 
 Options:
 
 - `--project <folder>` opens a project in the editor directly.
 - `--example <id>` starts an example: `hello-triangle`, `2d-test`, `pixel-perfect`,
-  `tilemap-editor`, `3d-test` or `photoreal`.
+  `tilemap-editor`, `forward-plus` or `deferred-plus`.
 - The `PIRENEUS_RENDERER=vulkan|dx12` environment variable picks the backend without the dialog.
 - The `PIRENEUS_EXAMPLE` environment variable works like `--example`.
 
@@ -132,7 +142,8 @@ Details and limitations: [docs/UWP.md](docs/UWP.md).
 ## Repository layout
 
 ```
-cmake/            Shader compilation, UWP manifest and logos
+cmake/            Shader compilation, resource copy, UWP manifest and logos
+demos/            Demo projects (their large assets are downloaded separately)
 docs/             Documentation (GitHub Wiki format)
 examples/         The single executable: menu, examples and editor (scene-editor)
 resources/        Example assets, logos

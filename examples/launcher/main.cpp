@@ -31,8 +31,8 @@ static const Example* const examples[] = {
     &example_2d_test,
     &example_pixel_perfect,
     &example_tilemap_editor,
-    &example_3d_test,
-    &example_photoreal
+    &example_forward_plus,
+    &example_deferred_plus
 };
 
 #define EXAMPLE_COUNT ((int)(sizeof(examples) / sizeof(examples[0])))
@@ -256,6 +256,40 @@ static void on_project_chosen(void* user_data, const char* const* paths, int cou
     }
 }
 
+// The demo projects of the source tree (demos/, see docs/Demo-Scenes.md) : read where they are, their
+// large assets included, rather than copied next to the executable.
+#define MAX_DEMOS 16
+
+static char demo_paths[MAX_DEMOS][PROJECT_PATH_SIZE];
+static char demo_names[MAX_DEMOS][64];
+static int demo_count = -1;
+
+static SDL_EnumerationResult SDLCALL add_demo(void* user_data, const char* directory, const char* name)
+{
+    (void)user_data;
+
+    char project_file[PROJECT_PATH_SIZE + 64];
+    SDL_snprintf(project_file, sizeof(project_file), "%s%s/project.pireneus", directory, name);
+
+    if (demo_count < MAX_DEMOS && SDL_GetPathInfo(project_file, NULL))
+    {
+        SDL_snprintf(demo_paths[demo_count], sizeof(demo_paths[demo_count]), "%s%s", directory, name);
+        SDL_snprintf(demo_names[demo_count], sizeof(demo_names[demo_count]), "%s", name);
+        demo_count++;
+    }
+
+    return SDL_ENUM_CONTINUE;
+}
+
+static void find_demos(void)
+{
+    demo_count = 0;
+
+#ifdef PIRENEUS_DEMOS_DIRECTORY
+    SDL_EnumerateDirectory(PIRENEUS_DEMOS_DIRECTORY, add_demo, NULL);
+#endif
+}
+
 static void draw_projects(void)
 {
     if (recent_count < 0)
@@ -307,6 +341,34 @@ static void draw_projects(void)
     if (project_error[0])
     {
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s", project_error);
+    }
+
+    if (demo_count < 0)
+    {
+        find_demos();
+    }
+
+    if (demo_count > 0)
+    {
+        ImGui::Spacing();
+        ImGui::TextDisabled("Demos");
+
+        for (int i = 0; i < demo_count; i++)
+        {
+            ImGui::PushID(1000 + i);
+
+            if (ImGui::Selectable(demo_names[i]))
+            {
+                open_in_editor(demo_paths[i]);
+            }
+
+            if (ImGui::IsItemHovered())
+            {
+                ImGui::SetTooltip("%s", demo_paths[i]);
+            }
+
+            ImGui::PopID();
+        }
     }
 
     if (recent_count > 0)

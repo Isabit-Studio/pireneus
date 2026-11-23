@@ -31,6 +31,14 @@ static int retired_count;
 static int retired_capacity;
 static int frame_number;
 
+static void free_cpu_data(EditMeshGpu* gpu)
+{
+    SDL_free(gpu->parts);
+    SDL_free((void*)gpu->vertices);
+    SDL_free((void*)gpu->indices);
+    SDL_free((void*)gpu->vertex_faces);
+}
+
 static void retire(Mesh* mesh)
 {
     if (!mesh)
@@ -63,6 +71,7 @@ static void build(Entry* entry, const EditMesh* mesh)
 
     MeshVertex* vertices = SDL_malloc(sizeof(MeshVertex) * (size_t)SDL_max(1, corner_count));
     uint32_t* indices = SDL_malloc(sizeof(uint32_t) * (size_t)SDL_max(1, index_capacity));
+    int* vertex_faces = SDL_malloc(sizeof(int) * (size_t)SDL_max(1, corner_count));
     int* triangles = SDL_malloc(sizeof(int) * 3 * (size_t)SDL_max(1, corner_count));
     int vertex_count = 0;
     int index_count = 0;
@@ -115,6 +124,7 @@ static void build(Entry* entry, const EditMesh* mesh)
             for (int i = 0; i < face->count; i++)
             {
                 const float* p = edit_mesh_position(mesh, mesh->loops[face->first + i]);
+                vertex_faces[vertex_count] = f;
                 MeshVertex* out = &vertices[vertex_count++];
                 out->x = p[0];
                 out->y = p[1];
@@ -154,9 +164,13 @@ static void build(Entry* entry, const EditMesh* mesh)
     entry->gpu.mesh = index_count > 0 ? create_mesh(vertices, vertex_count, indices, index_count) : NULL;
     edit_mesh_bounds(mesh, entry->gpu.bounds);
 
+    entry->gpu.vertices = vertices;
+    entry->gpu.vertex_count = vertex_count;
+    entry->gpu.indices = indices;
+    entry->gpu.index_count = index_count;
+    entry->gpu.vertex_faces = vertex_faces;
+
     SDL_free(triangles);
-    SDL_free(indices);
-    SDL_free(vertices);
 }
 
 const EditMeshGpu* edit_mesh_gpu_get(uint32_t handle)
@@ -199,7 +213,7 @@ const EditMeshGpu* edit_mesh_gpu_get(uint32_t handle)
     else
     {
         retire(entry->gpu.mesh);
-        SDL_free(entry->gpu.parts);
+        free_cpu_data(&entry->gpu);
         SDL_zero(entry->gpu);
     }
 
@@ -222,7 +236,7 @@ void edit_mesh_gpu_end_frame(void)
         if (frame_number - entries[i].last_used > RETIRE_DELAY)
         {
             retire(entries[i].gpu.mesh);
-            SDL_free(entries[i].gpu.parts);
+            free_cpu_data(&entries[i].gpu);
         }
         else
         {
@@ -257,7 +271,7 @@ void edit_mesh_gpu_clear(void)
             destroy_mesh(entries[i].gpu.mesh);
         }
 
-        SDL_free(entries[i].gpu.parts);
+        free_cpu_data(&entries[i].gpu);
     }
 
     for (int i = 0; i < retired_count; i++)

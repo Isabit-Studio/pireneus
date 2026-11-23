@@ -13,9 +13,11 @@
 #include "ImGuizmo.h"
 
 #include "assets/asset_database.h"
+#include "bake/bake.h"
 #include "launcher/editor_fonts.h"
 #include "math/math3d.h"
 #include "meshedit/edit_mesh.h"
+#include "renderer/render3d/render3d.h"
 #include "project/project.h"
 #include "scene/scene.h"
 
@@ -68,6 +70,8 @@ void editor_redo(void);
 
 SceneObject* editor_add_object(const char* name);
 SceneObject* editor_add_model(const char* model_path, const char* name);
+SceneObject* editor_add_light(int light_type); // SceneLightType
+SceneObject* editor_add_reflection_probe(void);
 SceneObject* editor_add_sprite(const char* sprite_path);
 SceneObject* editor_add_mesh(EditMesh* mesh, const char* name); // takes the mesh ; a static collider, at the origin
 void editor_delete_selected(void);
@@ -90,6 +94,8 @@ void editor_fix_selection(void);                 // after objects were added or 
 void editor_new_scene(void);
 void editor_save_scene(void);
 void editor_load_scene(const char* relative_path);
+void editor_sun(float out_direction[3], float out_color[3]); // toward the sun ; its irradiance
+const Environment* editor_environment(void);                // the scene's sky, NULL if it can't be made
 void editor_apply_settings(void);  // after the project's settings changed
 void editor_save_project(void);
 
@@ -106,6 +112,9 @@ typedef struct
     float near_plane;
     float far_plane;
     bool orthographic;
+    Vec3 target;             // what the camera looks at
+    float half_height;       // orthographic : half the world height in view
+    float area[4];           // the part of the window it's framed on : x, y, width, height in pixels
 } CameraMatrices;
 
 const CameraMatrices* editor_camera(void);   // this frame's
@@ -121,6 +130,19 @@ int editor_raycast(Vec3 origin, Vec3 direction, int filter, float* out_t, int* o
 
 // An object's local bounds (min xyz, max xyz), 0 if it has none to speak of.
 int editor_object_bounds(const SceneObject* object, float out_bounds[6]);
+
+// --- Baked lighting (lighting.cpp) ---
+void lighting_scene_loaded(void);   // after the scene changed : its baked data, if there's some
+void lighting_update(void);         // a running bake : polled, its progress shown
+void lighting_draw_menu(void);
+void lighting_prepare_frame(Vec3 eye);
+int lighting_light_baked_out(const SceneObject* object); // a baked light, already in the lightmaps : not drawn live
+Render3DDrawOptions lighting_draw_options(const SceneObject* object, int vertex_count);
+int lighting_is_baking(void);
+void lighting_shutdown(void);
+void lighting_add_reflection_probes(void); // the baked ones, to this frame's render
+int lighting_capture_render(void);         // capturing reflection probes : renders a face instead of the view ; 1 if it did
+int editor_render_capture(const Render3DCamera* camera, int size); // main.cpp : the scene into render3d_hdr_image()
 
 // --- Level editing (level_editor.cpp), after Valve's Hammer (Source 2) ---
 enum { SELECT_VERTICES, SELECT_EDGES, SELECT_FACES, SELECT_MESHES, SELECT_OBJECTS, SELECTION_MODE_COUNT };

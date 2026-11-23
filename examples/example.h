@@ -34,9 +34,9 @@ extern const Example example_hello_triangle;
 extern const Example example_2d_test;
 extern const Example example_pixel_perfect;
 extern const Example example_tilemap_editor;
-extern const Example example_3d_test;
+extern const Example example_forward_plus;
+extern const Example example_deferred_plus;
 extern const Example example_scene_editor;
-extern const Example example_photoreal;
 
 // Leaves the running example at the end of the current frame, back to the launcher's menu.
 void example_return_to_menu(void);

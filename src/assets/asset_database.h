@@ -6,7 +6,8 @@
 #include "audio/audio.h"
 #include "model/model.h"
 #include "project/project.h"
-#include "renderer/photoreal/photoreal.h"
+#include "renderer/render3d/pbr_texture.h"
+#include "renderer/render3d/render3d.h"
 #include "renderer/renderer.h"
 
 #ifdef __cplusplus
@@ -75,6 +76,7 @@ typedef struct
     ModelData data;
     PbrMaterial* materials;    // one per ModelData::materials
     Texture** textures;        // owned : one per ModelData::textures, NULL if unused
+    PbrTextureInfo* texture_info; // one per ModelData::textures : what loading each found
     float bounds[6];           // min xyz, max xyz
 } LoadedModel;
 

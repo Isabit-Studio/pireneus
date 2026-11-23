@@ -12,7 +12,6 @@
 
 #include "renderer/renderer.h"
 #include "renderer/ortho.h"
-#include "renderer/mesh_constants.h"
 #include "renderer/vulkan/vulkan_renderer.h"
 #include "debug.h"
 
@@ -33,7 +32,8 @@ static int memory_budget_enabled;
 #define VERTEX_BUFFER_SIZE (8 * 1024 * 1024) // per frame in flight : 262144 vertices
 #define MAX_TEXTURES 4096
 #define BINDLESS_CAPACITY 8192
-#define GPU_FRAME_BUFFER_SIZE (8 * 1024 * 1024)
+#define BINDLESS_MS_BINDING 7 // g_textures_ms
+#define GPU_FRAME_BUFFER_SIZE (32 * 1024 * 1024)
 #define NO_BINDLESS_INDEX UINT32_MAX
 
 struct Texture
@@ -46,6 +46,7 @@ struct Texture
     uint32_t width, height;
     VkFormat format;
     int is_depth;
+    int samples;
 };
 
 struct RenderTarget
@@ -94,20 +95,14 @@ typedef struct
 
 struct Mesh
 {
-    // Device-local : the photoreal renderer's shading pass reads vertices for every pixel.
+    // Device-local : Deferred+'s shading pass reads vertices for every pixel.
     DeviceBuffer vertices;
     DeviceBuffer indices;
     uint32_t index_count;
     uint32_t vertex_count;
     Blas* blas;
     int blas_count;
-};
-
-struct ShadowMap
-{
-    Texture texture; // depth image, sampled through a regular texture descriptor set
-    VkFramebuffer framebuffer;
-    int size;
+    int blas_hint;          // where the next lookup looks first
 };
 
 typedef struct
@@ -146,27 +141,9 @@ static VkSampler sampler;
 static VkPipelineLayout pipeline_layout;
 static VkPipeline pipeline;
 // The same sprite pipeline, for render-target passes : a Vulkan pipeline is only compatible with
-// render passes whose attachments have the same formats, and a render target (RGBA8, color only)
-// differs from the window's pass (swapchain format + depth).
+// render passes whose attachments have the same formats, and a render target (RGBA8) differs from
+// the window's pass (swapchain format).
 static VkPipeline render_target_pipeline;
-
-// --- 3D (see begin_scene / begin_shadow_pass) ---
-// D32_SFLOAT : usable both as a depth attachment and as a sampled image on every desktop GPU
-// (checked at startup), for the window's depth buffer and for shadow maps alike.
-#define DEPTH_FORMAT VK_FORMAT_D32_SFLOAT
-
-static VkImage depth_image; // the window pass's depth buffer, recreated with the swapchain
-static VmaAllocation depth_allocation;
-static VkImageView depth_view;
-
-static VkRenderPass shadow_render_pass; // depth only, ends in SHADER_READ_ONLY_OPTIMAL
-static VkPipelineLayout mesh_pipeline_layout;
-static VkPipeline mesh_pipeline;   // forward pass, in render_pass
-static VkPipeline shadow_pipeline; // depth only, in shadow_render_pass
-static VkPipeline sky_pipeline;    // full-screen triangle at the far plane, in render_pass
-static Texture* scene_pass_texture; // what begin_scene() bound (shadow map), restored after draw_skybox()
-static int mesh_supported;         // 0 if the GPU can't run the 3D pipelines (push constant budget, depth format)
-static MeshConstants mesh_constants; // the current pass's constants ; draw_mesh() only changes `model`
 
 static VkCommandPool command_pool;
 static VkCommandBuffer command_buffers[MAX_FRAMES_IN_FLIGHT];
@@ -197,6 +174,7 @@ static int frame_recording;
 
 // --- Bindless GPU layer (see gpu.h) ---
 static int gpu_available;
+static int bc_available; // BC block-compressed textures (textureCompressionBC)
 static VkDescriptorSetLayout bindless_layout;
 static VkDescriptorPool bindless_pool;
 static VkDescriptorSet bindless_set;
@@ -476,6 +454,7 @@ static int create_logical_device(void)
             features12.descriptorBindingStorageBufferUpdateAfterBind && features12.descriptorBindingUpdateUnusedWhilePending &&
             features12.shaderSampledImageArrayNonUniformIndexing && features12.shaderStorageBufferArrayNonUniformIndexing &&
             features2.features.geometryShader && features2.features.samplerAnisotropy;
+        bc_available = features2.features.textureCompressionBC;
     }
 
     // Ray tracing, on top of that, if the device has it.
@@ -551,7 +530,7 @@ static int create_logical_device(void)
     VkPhysicalDeviceFeatures2 enable2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .pNext = &enable12,
-        .features = { .geometryShader = VK_TRUE, .samplerAnisotropy = VK_TRUE }
+        .features = { .geometryShader = VK_TRUE, .samplerAnisotropy = VK_TRUE, .textureCompressionBC = bc_available ? VK_TRUE : VK_FALSE }
     };
 
     // Video memory usage and budget for the profiler (VMA reads them through this extension).
@@ -856,29 +835,15 @@ static int create_image_views(void)
 
 static int create_render_pass(void)
 {
-    VkAttachmentDescription attachments[2] = {
-        {
-            .format = swapchain_image_format,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-        },
-        {
-            // Depth for 3D scenes (begin_scene) : cleared every frame, never stored. The 2D
-            // pipelines simply have depth testing disabled.
-            .format = DEPTH_FORMAT,
-            .samples = VK_SAMPLE_COUNT_1_BIT,
-            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-        }
+    VkAttachmentDescription color_attachment = {
+        .format = swapchain_image_format,
+        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
     };
 
     VkAttachmentReference color_attachment_ref = {
@@ -886,33 +851,25 @@ static int create_render_pass(void)
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
     };
 
-    VkAttachmentReference depth_attachment_ref = {
-        .attachment = 1,
-        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    };
-
     VkSubpassDescription subpass = {
         .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
         .colorAttachmentCount = 1,
-        .pColorAttachments = &color_attachment_ref,
-        .pDepthStencilAttachment = &depth_attachment_ref
+        .pColorAttachments = &color_attachment_ref
     };
 
-    // Also orders this frame's depth clear/writes after the previous frame's : a single depth
-    // image is shared by every frame in flight.
     VkSubpassDependency dependency = {
         .srcSubpass = VK_SUBPASS_EXTERNAL,
         .dstSubpass = 0,
-        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
     };
 
     VkRenderPassCreateInfo render_pass_create_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 2,
-        .pAttachments = attachments,
+        .attachmentCount = 1,
+        .pAttachments = &color_attachment,
         .subpassCount = 1,
         .pSubpasses = &subpass,
         .dependencyCount = 1,
@@ -922,81 +879,6 @@ static int create_render_pass(void)
     if (vkCreateRenderPass(device, &render_pass_create_info, NULL, &render_pass) != VK_SUCCESS)
     {
         printf("Could not create the Vulkan render pass.\n");
-        return 0;
-    }
-
-    return 1;
-}
-
-static int create_shadow_render_pass(void)
-{
-    VkFormatProperties format_properties;
-    vkGetPhysicalDeviceFormatProperties(physical_device, DEPTH_FORMAT, &format_properties);
-
-    VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
-
-    if ((format_properties.optimalTilingFeatures & required) != required)
-    {
-        printf("This GPU can't sample D32_SFLOAT depth images : 3D rendering is unavailable.\n");
-        mesh_supported = 0;
-    }
-
-    VkAttachmentDescription depth_attachment = {
-        .format = DEPTH_FORMAT,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    };
-
-    VkAttachmentReference depth_attachment_ref = {
-        .attachment = 0,
-        .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-    };
-
-    VkSubpassDescription subpass = {
-        .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-        .colorAttachmentCount = 0,
-        .pDepthStencilAttachment = &depth_attachment_ref
-    };
-
-    VkSubpassDependency dependencies[2] = {
-        {
-            // Earlier frames (still in flight) sampling this shadow map, before it's overwritten.
-            .srcSubpass = VK_SUBPASS_EXTERNAL,
-            .dstSubpass = 0,
-            .srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            .srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
-            .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
-        },
-        {
-            // This pass's depth writes, before the scene pass samples them.
-            .srcSubpass = 0,
-            .dstSubpass = VK_SUBPASS_EXTERNAL,
-            .srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-            .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_SHADER_READ_BIT
-        }
-    };
-
-    VkRenderPassCreateInfo render_pass_create_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &depth_attachment,
-        .subpassCount = 1,
-        .pSubpasses = &subpass,
-        .dependencyCount = 2,
-        .pDependencies = dependencies
-    };
-
-    if (vkCreateRenderPass(device, &render_pass_create_info, NULL, &shadow_render_pass) != VK_SUCCESS)
-    {
-        printf("Could not create the Vulkan shadow render pass.\n");
         return 0;
     }
 
@@ -1134,7 +1016,7 @@ static int create_bindless(void)
         return 1;
     }
 
-    // The fixed samplers, g_sampler_* in photoreal.slang (bindings 2 to 5).
+    // The fixed samplers, g_sampler_* in render3d_common.slang (bindings 2 to 5).
     VkSamplerCreateInfo sampler_infos[GPU_SAMPLER_COUNT] = {
         [GPU_SAMPLER_POINT_CLAMP] = {
             .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -1172,13 +1054,13 @@ static int create_bindless(void)
     }
 
     // The table's two arrays, then one immutable sampler per binding (shaders declare them as separate
-    // variables, see photoreal.slang).
-    VkDescriptorSetLayoutBinding bindings[3 + GPU_SAMPLER_COUNT] = {
+    // variables, see render3d_common.slang).
+    VkDescriptorSetLayoutBinding bindings[4 + GPU_SAMPLER_COUNT] = {
         { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = BINDLESS_CAPACITY, .stageFlags = VK_SHADER_STAGE_ALL },
         { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = BINDLESS_CAPACITY, .stageFlags = VK_SHADER_STAGE_ALL }
     };
 
-    VkDescriptorBindingFlags binding_flags[3 + GPU_SAMPLER_COUNT] = {
+    VkDescriptorBindingFlags binding_flags[4 + GPU_SAMPLER_COUNT] = {
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT,
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT
     };
@@ -1212,6 +1094,17 @@ static int create_bindless(void)
         binding_count++;
     }
 
+    VkDescriptorSetLayoutBinding ms_binding = {
+        .binding = BINDLESS_MS_BINDING,
+        .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+        .descriptorCount = BINDLESS_CAPACITY,
+        .stageFlags = VK_SHADER_STAGE_ALL
+    };
+
+    bindings[binding_count] = ms_binding;
+    binding_flags[binding_count] = binding_flags[0];
+    binding_count++;
+
     VkDescriptorSetLayoutBindingFlagsCreateInfo flags_info = {
         .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO,
         .bindingCount = binding_count,
@@ -1233,7 +1126,7 @@ static int create_bindless(void)
     }
 
     VkDescriptorPoolSize pool_sizes[4] = {
-        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, BINDLESS_CAPACITY },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, BINDLESS_CAPACITY * 2 },
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, BINDLESS_CAPACITY },
         { VK_DESCRIPTOR_TYPE_SAMPLER, GPU_SAMPLER_COUNT },
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, MAX_FRAMES_IN_FLIGHT }
@@ -1330,10 +1223,11 @@ static void register_bindless_texture(Texture* texture)
         .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
     };
 
+    // Multisampled images have their own array, g_textures_ms (binding 7), at the same index.
     VkWriteDescriptorSet write = {
         .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
         .dstSet = bindless_set,
-        .dstBinding = 0,
+        .dstBinding = texture->samples > 1 ? BINDLESS_MS_BINDING : 0,
         .dstArrayElement = texture->bindless_index,
         .descriptorCount = 1,
         .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -1429,39 +1323,19 @@ static int create_pipeline_layouts(void)
         return 0;
     }
 
-    VkPhysicalDeviceProperties properties;
-    vkGetPhysicalDeviceProperties(physical_device, &properties);
-
-    if (properties.limits.maxPushConstantsSize < sizeof(MeshConstants))
-    {
-        printf("This GPU only has %u bytes of push constants (%u needed) : 3D rendering is unavailable.\n",
-            properties.limits.maxPushConstantsSize, (unsigned)sizeof(MeshConstants));
-        mesh_supported = 0;
-        return 1;
-    }
-
-    if (!create_pipeline_layout(sizeof(MeshConstants), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, &mesh_pipeline_layout))
-    {
-        printf("Could not create the Vulkan mesh pipeline layout.\n");
-        return 0;
-    }
-
     return 1;
 }
 
 typedef struct
 {
     const char* vertex_shader;   // compiled shader names, see load_shader()
-    const char* fragment_shader; // NULL : depth-only pipeline
-    const VkVertexInputBindingDescription* binding; // NULL : no vertex buffer (vertices from the vertex index)
+    const char* fragment_shader;
+    const VkVertexInputBindingDescription* binding;
     const VkVertexInputAttributeDescription* attributes;
     uint32_t attribute_count;
     VkPipelineLayout layout;
     VkRenderPass render_pass;
-    int depth_test;       // depth test + write (LESS)
-    int depth_read_only;  // depth test only (LESS_OR_EQUAL), no write : drawing at the far plane
-    int alpha_blend;      // premultiplied-style alpha blending, as the 2D pipelines use
-    int color_attachment; // 0 for depth-only render passes
+    int alpha_blend;
 } PipelineDescription;
 
 static int create_pipeline(const PipelineDescription* description, VkPipeline* out_pipeline)
@@ -1470,9 +1344,9 @@ static int create_pipeline(const PipelineDescription* description, VkPipeline* o
     size_t frag_size = 0;
 
     uint8_t* vert_code = load_shader(description->vertex_shader, &vert_size);
-    uint8_t* frag_code = description->fragment_shader ? load_shader(description->fragment_shader, &frag_size) : NULL;
+    uint8_t* frag_code = load_shader(description->fragment_shader, &frag_size);
 
-    if (!vert_code || (description->fragment_shader && !frag_code))
+    if (!vert_code || !frag_code)
     {
         printf("Could not load the '%s' shaders.\n", description->vertex_shader);
         SDL_free(vert_code);
@@ -1481,12 +1355,12 @@ static int create_pipeline(const PipelineDescription* description, VkPipeline* o
     }
 
     VkShaderModule vert_module = create_shader_module(vert_code, vert_size);
-    VkShaderModule frag_module = frag_code ? create_shader_module(frag_code, frag_size) : VK_NULL_HANDLE;
+    VkShaderModule frag_module = create_shader_module(frag_code, frag_size);
 
     SDL_free(vert_code);
     SDL_free(frag_code);
 
-    if (vert_module == VK_NULL_HANDLE || (description->fragment_shader && frag_module == VK_NULL_HANDLE))
+    if (vert_module == VK_NULL_HANDLE || frag_module == VK_NULL_HANDLE)
     {
         printf("Could not create the '%s' shader modules.\n", description->vertex_shader);
         vkDestroyShaderModule(device, vert_module, NULL);
@@ -1511,7 +1385,7 @@ static int create_pipeline(const PipelineDescription* description, VkPipeline* o
 
     VkPipelineVertexInputStateCreateInfo vertex_input_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = description->binding ? 1 : 0,
+        .vertexBindingDescriptionCount = 1,
         .pVertexBindingDescriptions = description->binding,
         .vertexAttributeDescriptionCount = description->attribute_count,
         .pVertexAttributeDescriptions = description->attributes
@@ -1528,8 +1402,7 @@ static int create_pipeline(const PipelineDescription* description, VkPipeline* o
         .scissorCount = 1
     };
 
-    // No culling anywhere : 2D quads face the camera by construction, and imported 3D scenes may
-    // have open or single-sided geometry (shadow casters included).
+    // No culling : 2D quads face the camera by construction.
     VkPipelineRasterizationStateCreateInfo rasterization_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
         .polygonMode = VK_POLYGON_MODE_FILL,
@@ -1541,13 +1414,6 @@ static int create_pipeline(const PipelineDescription* description, VkPipeline* o
     VkPipelineMultisampleStateCreateInfo multisample_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
-    };
-
-    VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = (description->depth_test || description->depth_read_only) ? VK_TRUE : VK_FALSE,
-        .depthWriteEnable = description->depth_test ? VK_TRUE : VK_FALSE,
-        .depthCompareOp = description->depth_read_only ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_LESS
     };
 
     VkPipelineColorBlendAttachmentState color_blend_attachment = {
@@ -1564,7 +1430,7 @@ static int create_pipeline(const PipelineDescription* description, VkPipeline* o
 
     VkPipelineColorBlendStateCreateInfo color_blend_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = description->color_attachment ? 1 : 0,
+        .attachmentCount = 1,
         .pAttachments = &color_blend_attachment
     };
 
@@ -1578,14 +1444,13 @@ static int create_pipeline(const PipelineDescription* description, VkPipeline* o
 
     VkGraphicsPipelineCreateInfo pipeline_create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .stageCount = description->fragment_shader ? 2 : 1,
+        .stageCount = 2,
         .pStages = shader_stages,
         .pVertexInputState = &vertex_input_state,
         .pInputAssemblyState = &input_assembly_state,
         .pViewportState = &viewport_state,
         .pRasterizationState = &rasterization_state,
         .pMultisampleState = &multisample_state,
-        .pDepthStencilState = &depth_stencil_state,
         .pColorBlendState = &color_blend_state,
         .pDynamicState = &dynamic_state,
         .layout = description->layout,
@@ -1629,9 +1494,7 @@ static int create_pipelines(void)
         .attribute_count = 3,
         .layout = pipeline_layout,
         .render_pass = render_pass,
-        .depth_test = 0,
-        .alpha_blend = 1,
-        .color_attachment = 1
+        .alpha_blend = 1
     };
 
     if (!create_pipeline(&sprite, &pipeline))
@@ -1641,59 +1504,9 @@ static int create_pipelines(void)
 
     sprite.render_pass = render_target_render_pass;
 
-    if (!create_pipeline(&sprite, &render_target_pipeline))
-    {
-        return 0;
-    }
-
-    if (!mesh_supported)
-    {
-        return 1;
-    }
-
-    VkVertexInputBindingDescription mesh_binding = {
-        .binding = 0,
-        .stride = sizeof(MeshVertex),
-        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
-    };
-
-    VkVertexInputAttributeDescription mesh_attributes[3] = {
-        { .location = 0, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(MeshVertex, x) },
-        { .location = 1, .binding = 0, .format = VK_FORMAT_R32G32B32_SFLOAT, .offset = offsetof(MeshVertex, nx) },
-        { .location = 2, .binding = 0, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .offset = offsetof(MeshVertex, r) }
-    };
-
-    PipelineDescription scene = {
-        .vertex_shader = "mesh.vert",
-        .fragment_shader = "mesh.frag",
-        .binding = &mesh_binding,
-        .attributes = mesh_attributes,
-        .attribute_count = 3,
-        .layout = mesh_pipeline_layout,
-        .render_pass = render_pass,
-        .depth_test = 1,
-        .alpha_blend = 0,
-        .color_attachment = 1
-    };
-
-    PipelineDescription shadow = scene;
-    shadow.vertex_shader = "mesh_shadow.vert";
-    shadow.fragment_shader = NULL;
-    shadow.render_pass = shadow_render_pass;
-    shadow.color_attachment = 0;
-
-    PipelineDescription sky = scene;
-    sky.vertex_shader = "sky.vert";
-    sky.fragment_shader = "sky.frag";
-    sky.binding = NULL;
-    sky.attributes = NULL;
-    sky.attribute_count = 0;
-    sky.depth_test = 0;
-    sky.depth_read_only = 1;
-
-    return create_pipeline(&scene, &mesh_pipeline) && create_pipeline(&shadow, &shadow_pipeline) &&
-        create_pipeline(&sky, &sky_pipeline);
+    return create_pipeline(&sprite, &render_target_pipeline);
 }
+
 
 static int create_image_view(VkImage image, VkFormat format, VkImageAspectFlags aspect, VkImageView* out_view)
 {
@@ -1714,13 +1527,11 @@ static int create_framebuffers(void)
 
     for (uint32_t i = 0; i < swapchain_image_count; i++)
     {
-        VkImageView attachments[2] = { swapchain_image_views[i], depth_view };
-
         VkFramebufferCreateInfo framebuffer_create_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
             .renderPass = render_pass,
-            .attachmentCount = 2,
-            .pAttachments = attachments,
+            .attachmentCount = 1,
+            .pAttachments = &swapchain_image_views[i],
             .width = swapchain_extent.width,
             .height = swapchain_extent.height,
             .layers = 1
@@ -1852,45 +1663,6 @@ static int create_device_image(uint32_t width, uint32_t height, VkFormat format,
 
     return vmaCreateImage(allocator, &image_create_info, &allocation_create_info,
         &texture->image, &texture->allocation, NULL) == VK_SUCCESS;
-}
-
-static int create_depth_resources(void)
-{
-    Texture depth = { 0 };
-
-    if (!create_device_image(swapchain_extent.width, swapchain_extent.height, DEPTH_FORMAT,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, &depth))
-    {
-        printf("Could not create the Vulkan depth buffer.\n");
-        return 0;
-    }
-
-    depth_image = depth.image;
-    depth_allocation = depth.allocation;
-
-    if (!create_image_view(depth_image, DEPTH_FORMAT, VK_IMAGE_ASPECT_DEPTH_BIT, &depth_view))
-    {
-        printf("Could not create the Vulkan depth buffer view.\n");
-        return 0;
-    }
-
-    return 1;
-}
-
-static void destroy_depth_resources(void)
-{
-    if (depth_view != VK_NULL_HANDLE)
-    {
-        vkDestroyImageView(device, depth_view, NULL);
-        depth_view = VK_NULL_HANDLE;
-    }
-
-    if (depth_image != VK_NULL_HANDLE)
-    {
-        vmaDestroyImage(allocator, depth_image, depth_allocation);
-        depth_image = VK_NULL_HANDLE;
-        depth_allocation = NULL;
-    }
 }
 
 // The combined image sampler descriptor every sampled image (texture, render target, shadow map) binds through.
@@ -2118,7 +1890,6 @@ static int create_white_texture(void)
 
 static void cleanup_swapchain(void)
 {
-    destroy_depth_resources();
 
     for (uint32_t i = 0; i < swapchain_image_count; i++)
     {
@@ -2158,7 +1929,7 @@ static int recreate_swapchain(void)
 
     cleanup_swapchain();
 
-    if (!create_swapchain() || !create_image_views() || !create_depth_resources() || !create_framebuffers())
+    if (!create_swapchain() || !create_image_views() || !create_framebuffers())
     {
         return 0;
     }
@@ -2330,13 +2101,6 @@ int vulkan_create_renderer(Window* target_window)
         return 0;
     }
 
-    mesh_supported = 1; // until proven otherwise by create_shadow_render_pass()/create_pipeline_layouts()
-
-    if (!create_shadow_render_pass())
-    {
-        return 0;
-    }
-
     if (!create_sampler())
     {
         return 0;
@@ -2358,11 +2122,6 @@ int vulkan_create_renderer(Window* target_window)
     }
 
     if (!create_pipeline_layouts() || !create_pipelines())
-    {
-        return 0;
-    }
-
-    if (!create_depth_resources())
     {
         return 0;
     }
@@ -2777,10 +2536,7 @@ static void ensure_window_pass(void)
 
     window_pass_active = 1;
 
-    VkClearValue clear_values[2] = {
-        { .color.float32 = { 0.0f, 0.0f, 0.0f, 1.0f } },
-        { .depthStencil = { 1.0f, 0 } }
-    };
+    VkClearValue clear_value = { .color.float32 = { 0.0f, 0.0f, 0.0f, 1.0f } };
 
     VkRenderPassBeginInfo render_pass_begin_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
@@ -2788,8 +2544,8 @@ static void ensure_window_pass(void)
         .framebuffer = swapchain_framebuffers[current_image_index],
         .renderArea.offset = { 0, 0 },
         .renderArea.extent = swapchain_extent,
-        .clearValueCount = 2,
-        .pClearValues = clear_values
+        .clearValueCount = 1,
+        .pClearValues = &clear_value
     };
 
     vkCmdBeginRenderPass(current_command_buffer, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
@@ -2989,11 +2745,6 @@ void vulkan_destroy_renderer(void)
 
     vkDestroyPipeline(device, pipeline, NULL);
     vkDestroyPipeline(device, render_target_pipeline, NULL);
-    vkDestroyPipeline(device, mesh_pipeline, NULL);
-    vkDestroyPipeline(device, shadow_pipeline, NULL);
-    vkDestroyPipeline(device, sky_pipeline, NULL);
-    vkDestroyPipelineLayout(device, mesh_pipeline_layout, NULL);
-    vkDestroyRenderPass(device, shadow_render_pass, NULL);
     vkDestroyPipelineLayout(device, pipeline_layout, NULL);
     vkDestroyDescriptorPool(device, descriptor_pool, NULL);
     vkDestroyDescriptorSetLayout(device, descriptor_set_layout, NULL);
@@ -3058,11 +2809,6 @@ static void destroy_device_buffer(DeviceBuffer* buffer)
 
 Mesh* vulkan_create_mesh(const MeshVertex* vertices, int vertex_count, const uint32_t* indices, int index_count)
 {
-    if (!mesh_supported)
-    {
-        return NULL;
-    }
-
     Mesh* mesh = SDL_calloc(1, sizeof(Mesh));
     VkDeviceSize vertices_size = sizeof(MeshVertex) * (VkDeviceSize)vertex_count;
     VkDeviceSize indices_size = sizeof(uint32_t) * (VkDeviceSize)index_count;
@@ -3110,199 +2856,6 @@ void vulkan_destroy_mesh(Mesh* mesh)
     DEBUG_LOG("[vulkan] mesh destroyed\n");
 }
 
-ShadowMap* vulkan_create_shadow_map(int size)
-{
-    if (!mesh_supported)
-    {
-        return NULL;
-    }
-
-    ShadowMap* shadow_map = SDL_calloc(1, sizeof(ShadowMap));
-    shadow_map->size = size;
-
-    if (!create_device_image((uint32_t)size, (uint32_t)size, DEPTH_FORMAT,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, &shadow_map->texture))
-    {
-        printf("Could not create a Vulkan shadow map image.\n");
-        SDL_free(shadow_map);
-        return NULL;
-    }
-
-    if (!create_image_view(shadow_map->texture.image, DEPTH_FORMAT, VK_IMAGE_ASPECT_DEPTH_BIT, &shadow_map->texture.view))
-    {
-        printf("Could not create a Vulkan shadow map view.\n");
-        vmaDestroyImage(allocator, shadow_map->texture.image, shadow_map->texture.allocation);
-        SDL_free(shadow_map);
-        return NULL;
-    }
-
-    VkFramebufferCreateInfo framebuffer_create_info = {
-        .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-        .renderPass = shadow_render_pass,
-        .attachmentCount = 1,
-        .pAttachments = &shadow_map->texture.view,
-        .width = (uint32_t)size,
-        .height = (uint32_t)size,
-        .layers = 1
-    };
-
-    if (vkCreateFramebuffer(device, &framebuffer_create_info, NULL, &shadow_map->framebuffer) != VK_SUCCESS ||
-        !allocate_texture_descriptor(&shadow_map->texture))
-    {
-        printf("Could not create a Vulkan shadow map framebuffer/descriptor.\n");
-        vkDestroyFramebuffer(device, shadow_map->framebuffer, NULL);
-        vkDestroyImageView(device, shadow_map->texture.view, NULL);
-        vmaDestroyImage(allocator, shadow_map->texture.image, shadow_map->texture.allocation);
-        SDL_free(shadow_map);
-        return NULL;
-    }
-
-    register_bindless_texture(&shadow_map->texture);
-
-    DEBUG_LOG("[vulkan] shadow map created: %dx%d\n", size, size);
-
-    return shadow_map;
-}
-
-void vulkan_destroy_shadow_map(ShadowMap* shadow_map)
-{
-    release_bindless_index(shadow_map->texture.bindless_index);
-    vkFreeDescriptorSets(device, descriptor_pool, 1, &shadow_map->texture.descriptor_set);
-    vkDestroyFramebuffer(device, shadow_map->framebuffer, NULL);
-    vkDestroyImageView(device, shadow_map->texture.view, NULL);
-    vmaDestroyImage(allocator, shadow_map->texture.image, shadow_map->texture.allocation);
-    SDL_free(shadow_map);
-
-    DEBUG_LOG("[vulkan] shadow map destroyed\n");
-}
-
-int vulkan_begin_shadow_pass(ShadowMap* shadow_map, const float light_view_projection[16])
-{
-    if (!mesh_supported)
-    {
-        return 0;
-    }
-
-    current_command_buffer = begin_one_time_commands();
-
-    VkClearValue clear_depth = { .depthStencil = { 1.0f, 0 } };
-
-    VkRenderPassBeginInfo render_pass_begin_info = {
-        .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-        .renderPass = shadow_render_pass,
-        .framebuffer = shadow_map->framebuffer,
-        .renderArea.offset = { 0, 0 },
-        .renderArea.extent = { (uint32_t)shadow_map->size, (uint32_t)shadow_map->size },
-        .clearValueCount = 1,
-        .pClearValues = &clear_depth
-    };
-
-    vkCmdBeginRenderPass(current_command_buffer, &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, shadow_pipeline);
-
-    // Same negative-height viewport as every other pass : the shadow map's texel rows then match
-    // the "clip +Y up, texture V down" lookup in mesh.slang exactly as on DX12.
-    VkViewport viewport = {
-        .x = 0.0f,
-        .y = (float)shadow_map->size,
-        .width = (float)shadow_map->size,
-        .height = -(float)shadow_map->size,
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f
-    };
-    vkCmdSetViewport(current_command_buffer, 0, 1, &viewport);
-
-    VkRect2D scissor = { .offset = { 0, 0 }, .extent = { (uint32_t)shadow_map->size, (uint32_t)shadow_map->size } };
-    vkCmdSetScissor(current_command_buffer, 0, 1, &scissor);
-
-    mesh_constants_for_shadow_pass(&mesh_constants, light_view_projection);
-
-    return 1;
-}
-
-void vulkan_end_shadow_pass(void)
-{
-    vkCmdEndRenderPass(current_command_buffer);
-    end_one_time_commands(current_command_buffer);
-}
-
-void vulkan_begin_scene(const SceneLighting* lighting, ShadowMap* shadow_map)
-{
-    if (!mesh_supported)
-    {
-        return;
-    }
-
-    ensure_window_pass();
-
-    vkCmdBindPipeline(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipeline);
-
-    // Without a shadow map, the white texture stands in : a stored depth of 1 never occludes.
-    Texture* shadow_texture = shadow_map ? &shadow_map->texture : &built_in_white_texture;
-    vkCmdBindDescriptorSets(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipeline_layout,
-        0, 1, &shadow_texture->descriptor_set, 0, NULL);
-    scene_pass_texture = shadow_texture;
-
-    mesh_constants_for_scene(&mesh_constants, lighting, shadow_map ? shadow_map->size : 0);
-}
-
-void vulkan_end_scene(void)
-{
-    if (!mesh_supported)
-    {
-        return;
-    }
-
-    // Back to the 2D state begin_frame() set up : the sprite pipeline, and its push constants
-    // (invalidated by the mesh pipeline's different layout).
-    vkCmdBindPipeline(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-
-    ScreenTransform transform = screen_transform_for_size((float)swapchain_extent.width, (float)swapchain_extent.height);
-    vkCmdPushConstants(current_command_buffer, pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(transform), &transform);
-}
-
-void vulkan_draw_mesh(Mesh* mesh, const float model[16], int first_index, int index_count)
-{
-    if (!mesh_supported)
-    {
-        return;
-    }
-
-    SDL_memcpy(mesh_constants.model, model, sizeof(mesh_constants.model));
-    vkCmdPushConstants(current_command_buffer, mesh_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, sizeof(mesh_constants), &mesh_constants);
-
-    VkDeviceSize offset = 0;
-    vkCmdBindVertexBuffers(current_command_buffer, 0, 1, &mesh->vertices.buffer, &offset);
-    vkCmdBindIndexBuffer(current_command_buffer, mesh->indices.buffer, 0, VK_INDEX_TYPE_UINT32);
-    uint32_t count = index_count < 0 ? mesh->index_count : (uint32_t)index_count;
-    vkCmdDrawIndexed(current_command_buffer, count, 1, (uint32_t)first_index, 0, 0);
-}
-
-void vulkan_draw_skybox(Texture* equirectangular, float intensity)
-{
-    if (!mesh_supported)
-    {
-        return;
-    }
-
-    MeshConstants sky_constants;
-    mesh_constants_for_sky(&sky_constants, mesh_constants.view_projection, intensity);
-
-    vkCmdBindPipeline(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, sky_pipeline);
-    vkCmdBindDescriptorSets(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipeline_layout,
-        0, 1, &equirectangular->descriptor_set, 0, NULL);
-    vkCmdPushConstants(current_command_buffer, mesh_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-        0, sizeof(sky_constants), &sky_constants);
-    vkCmdDraw(current_command_buffer, 3, 1, 0, 0);
-
-    // Back to the scene's state, so draw_mesh() keeps working after the sky (each draw_mesh()
-    // re-pushes the whole constant block, so only the pipeline and texture need restoring).
-    vkCmdBindPipeline(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipeline);
-    vkCmdBindDescriptorSets(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipeline_layout,
-        0, 1, &scene_pass_texture->descriptor_set, 0, NULL);
-}
-
 // --- GPU layer (gpu.h) -------------------------------------------------------------------------
 
 static VkFormat to_vk_format(GpuFormat format)
@@ -3315,25 +2868,15 @@ static VkFormat to_vk_format(GpuFormat format)
     case GPU_FORMAT_RGBA32F: return VK_FORMAT_R32G32B32A32_SFLOAT;
     case GPU_FORMAT_RG16F: return VK_FORMAT_R16G16_SFLOAT;
     case GPU_FORMAT_R16F: return VK_FORMAT_R16_SFLOAT;
+    case GPU_FORMAT_R32F: return VK_FORMAT_R32_SFLOAT;
     case GPU_FORMAT_R8: return VK_FORMAT_R8_UNORM;
     case GPU_FORMAT_D32: return VK_FORMAT_D32_SFLOAT;
+    case GPU_FORMAT_BC1: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+    case GPU_FORMAT_BC1_SRGB: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+    case GPU_FORMAT_BC3: return VK_FORMAT_BC3_UNORM_BLOCK;
+    case GPU_FORMAT_BC3_SRGB: return VK_FORMAT_BC3_SRGB_BLOCK;
+    case GPU_FORMAT_BC5: return VK_FORMAT_BC5_UNORM_BLOCK;
     default: return VK_FORMAT_UNDEFINED;
-    }
-}
-
-static uint32_t format_pixel_size(GpuFormat format)
-{
-    switch (format)
-    {
-    case GPU_FORMAT_RGBA8:
-    case GPU_FORMAT_RGBA8_SRGB:
-    case GPU_FORMAT_RG16F:
-    case GPU_FORMAT_D32: return 4;
-    case GPU_FORMAT_RGBA16F: return 8;
-    case GPU_FORMAT_RGBA32F: return 16;
-    case GPU_FORMAT_R16F: return 2;
-    case GPU_FORMAT_R8: return 1;
-    default: return 0;
     }
 }
 
@@ -3360,6 +2903,11 @@ int vulkan_gpu_supported(void)
     return gpu_available;
 }
 
+int vulkan_gpu_format_supported(GpuFormat format)
+{
+    return gpu_available && (!gpu_format_is_compressed(format) || bc_available);
+}
+
 Texture* vulkan_gpu_create_texture(const GpuTextureDesc* desc)
 {
     if (!gpu_available)
@@ -3372,6 +2920,7 @@ Texture* vulkan_gpu_create_texture(const GpuTextureDesc* desc)
     texture->height = (uint32_t)desc->height;
     texture->format = to_vk_format(desc->format);
     texture->is_depth = desc->format == GPU_FORMAT_D32;
+    texture->samples = SDL_max(1, desc->samples);
 
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
@@ -3392,7 +2941,7 @@ Texture* vulkan_gpu_create_texture(const GpuTextureDesc* desc)
         .extent = { texture->width, texture->height, 1 },
         .mipLevels = (uint32_t)desc->mip_count,
         .arrayLayers = 1,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .samples = (VkSampleCountFlagBits)texture->samples,
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
@@ -3416,7 +2965,8 @@ Texture* vulkan_gpu_create_texture(const GpuTextureDesc* desc)
         .subresourceRange = { texture->is_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)desc->mip_count, 0, 1 }
     };
 
-    if (vkCreateImageView(device, &view_create_info, NULL, &texture->view) != VK_SUCCESS || !allocate_texture_descriptor(texture))
+    // A multisampled target has no sprite descriptor : only the bindless table's g_textures_ms reads it.
+    if (vkCreateImageView(device, &view_create_info, NULL, &texture->view) != VK_SUCCESS || (texture->samples == 1 && !allocate_texture_descriptor(texture)))
     {
         printf("Could not create a Vulkan GPU texture view.\n");
         vmaDestroyImage(allocator, texture->image, texture->allocation);
@@ -3426,7 +2976,6 @@ Texture* vulkan_gpu_create_texture(const GpuTextureDesc* desc)
 
     // Every mip's pixels go through one staging buffer and one submission ; a target left uninitialized
     // only needs its first transition to the resting, shader-readable layout.
-    uint32_t pixel_size = format_pixel_size(desc->format);
     VkDeviceSize total_size = 0;
 
     if (desc->mips[0])
@@ -3435,7 +2984,7 @@ Texture* vulkan_gpu_create_texture(const GpuTextureDesc* desc)
         {
             uint32_t w = SDL_max(1u, texture->width >> mip);
             uint32_t h = SDL_max(1u, texture->height >> mip);
-            total_size += (VkDeviceSize)w * h * pixel_size;
+            total_size += (VkDeviceSize)gpu_format_level_size(desc->format, (int)w, (int)h);
         }
     }
 
@@ -3461,7 +3010,7 @@ Texture* vulkan_gpu_create_texture(const GpuTextureDesc* desc)
         {
             uint32_t w = SDL_max(1u, texture->width >> mip);
             uint32_t h = SDL_max(1u, texture->height >> mip);
-            VkDeviceSize size = (VkDeviceSize)w * h * pixel_size;
+            VkDeviceSize size = (VkDeviceSize)gpu_format_level_size(desc->format, (int)w, (int)h);
 
             SDL_memcpy((uint8_t*)staging.mapped + offset, desc->mips[mip], (size_t)size);
 
@@ -3499,6 +3048,64 @@ Texture* vulkan_gpu_create_texture(const GpuTextureDesc* desc)
 uint32_t vulkan_gpu_texture_index(Texture* texture)
 {
     return texture->bindless_index;
+}
+
+static uint32_t vk_pixel_size(VkFormat format)
+{
+    switch (format)
+    {
+    case VK_FORMAT_R8G8B8A8_UNORM:
+    case VK_FORMAT_R8G8B8A8_SRGB:
+    case VK_FORMAT_R16G16_SFLOAT:
+    case VK_FORMAT_R32_SFLOAT: return 4;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: return 8;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: return 16;
+    case VK_FORMAT_R16_SFLOAT: return 2;
+    case VK_FORMAT_R8_UNORM: return 1;
+    default: return 0;
+    }
+}
+
+int vulkan_gpu_read_texture(Texture* texture, void* out_pixels, size_t size)
+{
+    uint32_t pixel_size = vk_pixel_size(texture->format);
+    VkDeviceSize bytes = (VkDeviceSize)texture->width * texture->height * pixel_size;
+
+    if (pixel_size == 0 || texture->is_depth || texture->samples > 1 || size < bytes)
+    {
+        return 0;
+    }
+
+    vkDeviceWaitIdle(device);
+
+    MappedBuffer staging = { 0 };
+
+    if (!create_mapped_buffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &staging))
+    {
+        return 0;
+    }
+
+    VkCommandBuffer command_buffer = begin_one_time_commands();
+
+    image_barrier(command_buffer, texture, 1, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+
+    VkBufferImageCopy region = {
+        .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .imageExtent = { texture->width, texture->height, 1 }
+    };
+
+    vkCmdCopyImageToBuffer(command_buffer, texture->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1, &region);
+
+    image_barrier(command_buffer, texture, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
+    end_one_time_commands(command_buffer);
+
+    SDL_memcpy(out_pixels, staging.mapped, (size_t)bytes);
+    destroy_mapped_buffer(&staging);
+
+    return 1;
 }
 
 GpuBuffer* vulkan_gpu_create_buffer(const void* data, size_t size)
@@ -3618,14 +3225,14 @@ GpuPipeline* vulkan_gpu_create_pipeline(const GpuPipelineDesc* desc)
 
     VkPipelineMultisampleStateCreateInfo multisample_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT
+        .rasterizationSamples = (VkSampleCountFlagBits)SDL_max(1, desc->samples)
     };
 
     VkPipelineDepthStencilStateCreateInfo depth_stencil_state = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
         .depthTestEnable = desc->depth_test ? VK_TRUE : VK_FALSE,
         .depthWriteEnable = desc->depth_write ? VK_TRUE : VK_FALSE,
-        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL
+        .depthCompareOp = desc->depth_always ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL
     };
 
     VkPipelineColorBlendAttachmentState blend_attachments[GPU_MAX_COLOR_TARGETS];
@@ -3635,8 +3242,9 @@ GpuPipeline* vulkan_gpu_create_pipeline(const GpuPipelineDesc* desc)
     {
         VkPipelineColorBlendAttachmentState attachment = {
             .blendEnable = desc->blend != GPU_BLEND_NONE ? VK_TRUE : VK_FALSE,
-            .srcColorBlendFactor = desc->blend == GPU_BLEND_ADD ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_SRC_ALPHA,
-            .dstColorBlendFactor = desc->blend == GPU_BLEND_ADD ? VK_BLEND_FACTOR_ONE : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
+            .srcColorBlendFactor = desc->blend == GPU_BLEND_ALPHA ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE,
+            .dstColorBlendFactor = desc->blend == GPU_BLEND_ADD ? VK_BLEND_FACTOR_ONE :
+                desc->blend == GPU_BLEND_ATTENUATE ? VK_BLEND_FACTOR_SRC_ALPHA : VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
             .colorBlendOp = VK_BLEND_OP_ADD,
             .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
             .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
@@ -3805,6 +3413,7 @@ void vulkan_gpu_end_pass(void)
         image_barrier(current_command_buffer, gpu_pass_colors[i], 1, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
             VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT);
+
     }
 
     if (gpu_pass_depth)
@@ -3821,6 +3430,16 @@ void vulkan_gpu_end_pass(void)
 void vulkan_gpu_bind_pipeline(GpuPipeline* pipeline)
 {
     vkCmdBindPipeline(current_command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipeline);
+}
+
+void vulkan_gpu_set_viewport(int x, int y, int width, int height)
+{
+    // Negative height, as everywhere : the rectangle's top is at y, clip +Y up.
+    VkViewport viewport = { (float)x, (float)(y + height), (float)width, -(float)height, 0.0f, 1.0f };
+    vkCmdSetViewport(current_command_buffer, 0, 1, &viewport);
+
+    VkRect2D scissor = { { x, y }, { (uint32_t)width, (uint32_t)height } };
+    vkCmdSetScissor(current_command_buffer, 0, 1, &scissor);
 }
 
 void vulkan_gpu_push_constants(const void* data, int size)
@@ -3847,13 +3466,25 @@ int vulkan_gpu_raytracing_supported(void)
 // The structure for this range of the mesh's triangles, built the first time it's needed.
 static const Blas* ensure_blas(Mesh* mesh, uint32_t first_index, uint32_t index_count)
 {
+    // The same ranges come in the same order every frame : the one after the last found first.
+    int hint = mesh->blas_hint;
+
+    if (hint < mesh->blas_count && mesh->blas[hint].first_index == first_index && mesh->blas[hint].index_count == index_count)
+    {
+        mesh->blas_hint = hint + 1;
+        return &mesh->blas[hint];
+    }
+
     for (int i = 0; i < mesh->blas_count; i++)
     {
         if (mesh->blas[i].first_index == first_index && mesh->blas[i].index_count == index_count)
         {
+            mesh->blas_hint = i + 1;
             return &mesh->blas[i];
         }
     }
+
+    mesh->blas_hint = mesh->blas_count + 1; // where the one built now will be
 
     VkAccelerationStructureGeometryKHR geometry = {
         .sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR,
@@ -4022,17 +3653,10 @@ static const RendererBackend vulkan_backend = {
     .set_scissor = vulkan_set_scissor,
     .create_mesh = vulkan_create_mesh,
     .destroy_mesh = vulkan_destroy_mesh,
-    .create_shadow_map = vulkan_create_shadow_map,
-    .destroy_shadow_map = vulkan_destroy_shadow_map,
-    .begin_shadow_pass = vulkan_begin_shadow_pass,
-    .end_shadow_pass = vulkan_end_shadow_pass,
-    .begin_scene = vulkan_begin_scene,
-    .end_scene = vulkan_end_scene,
-    .draw_mesh = vulkan_draw_mesh,
-    .draw_skybox = vulkan_draw_skybox,
     .gpu_supported = vulkan_gpu_supported,
     .gpu_create_texture = vulkan_gpu_create_texture,
     .gpu_texture_index = vulkan_gpu_texture_index,
+    .gpu_read_texture = vulkan_gpu_read_texture,
     .gpu_create_buffer = vulkan_gpu_create_buffer,
     .gpu_destroy_buffer = vulkan_gpu_destroy_buffer,
     .gpu_buffer_index = vulkan_gpu_buffer_index,
@@ -4045,9 +3669,11 @@ static const RendererBackend vulkan_backend = {
     .gpu_end_pass = vulkan_gpu_end_pass,
     .gpu_bind_pipeline = vulkan_gpu_bind_pipeline,
     .gpu_push_constants = vulkan_gpu_push_constants,
+    .gpu_set_viewport = vulkan_gpu_set_viewport,
     .gpu_draw = vulkan_gpu_draw,
     .gpu_draw_indexed = vulkan_gpu_draw_indexed,
     .gpu_raytracing_supported = vulkan_gpu_raytracing_supported,
+    .gpu_format_supported = vulkan_gpu_format_supported,
     .gpu_build_ray_scene = vulkan_gpu_build_ray_scene
 };
 

@@ -1,0 +1,13 @@
+{
+  "name": "Bistro",
+  "template": "3d",
+  "startup_scene": "Assets/Scenes/Bistro.scene",
+  "physics": { "gravity_3d": [0, -9.81, 0], "gravity_2d": [0, -9.81], "rate": 60, "substeps": 4, "friction": 0.6, "restitution": 0 },
+  "collision": { "layers": ["Default", "Player", "Environment", "Props", "", "", "", "", "", "", "", "", "", "", "", ""], "masks": [65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535] },
+  "character": { "speed": 5, "sprint": 1.8, "jump_speed": 6, "acceleration": 40, "air_control": 0.25, "max_slope": 50, "mass": 75 },
+  "rendering": { "path": "forward_plus", "exposure_ev": 0, "tonemapper": 0, "bloom_strength": 0.04, "contrast": 0.15, "saturation": 1.05, "vignette": 0.25, "ao_radius": 0.8, "ao_power": 1.4, "sky_intensity": 1, "bounce_strength": 0.12, "sun_softness": 3, "fog_density": 0, "fog_height_falloff": 0.08, "fog_base_height": 0, "fog_color": [0.55, 0.65, 0.8], "fog_sun_color": [1, 0.85, 0.6], "fog_sun_power": 8, "ssr_distance": 20, "ssr_thickness": 0.3, "volumetric_distance": 80, "volumetric_anisotropy": 0.6, "volumetric_intensity": 1 },
+  "rendering_2d": { "pixel_perfect": 0, "pixel_height": 216, "background": [0.12, 0.13, 0.16, 1] },
+  "quality": { "preset": 4, "render_scale": 1, "shadow_resolution": 2048, "shadow_cascades": 4, "shadow_samples": 24, "shadow_distance": 172, "local_shadow_atlas": 4096, "local_shadow_lights": 12, "ao": 0, "ao_slices": 3, "ao_steps": 5, "bloom": 1, "fxaa": 0, "msaa": 4, "taa": 0, "sharpness": 0, "ssr": 0, "ssr_steps": 32, "volumetrics": 1, "volumetric_steps": 24, "volumetric_lights": 1, "gi": 0, "gi_rays": 64, "gi_spacing": 1.5, "gi_lights": 16 },
+  "baking": { "use": 1, "culling": 1, "texels_per_meter": 8, "page_size": 2048, "samples": 128, "bounces": 2, "probe_spacing": 1, "probe_rays": 192, "culling_cell": 4 },
+  "audio": { "master": 1, "music": 0.8, "sound": 1 }
+}

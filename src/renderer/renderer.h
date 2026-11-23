@@ -1,7 +1,7 @@
 // The engine's rendering API (RHI), the same on every backend : frames, textures, render targets,
-// the 2D primitive draw_vertices(), and the forward 3D path (meshes, shadow map, skybox). The calls are
-// forwarded by renderer.c to the backend chosen at runtime (Vulkan or DirectX 12, see
-// renderer_backend.h) ; the bindless layer used by the photorealistic renderer is in gpu.h.
+// the 2D primitive draw_vertices() and static meshes. The calls are forwarded by renderer.c to the
+// backend chosen at runtime (Vulkan or DirectX 12, see renderer_backend.h). 3D rendering is built on
+// the bindless layer of gpu.h, by renderer/render3d (Forward+ and Deferred+).
 
 #ifndef _RENDERER_H_
 #define _RENDERER_H_
@@ -60,20 +60,10 @@ void end_render_target_pass(void);
 // begin_render_target_pass/end_render_target_pass.
 void draw_vertices(const Vertex* vertices, int vertex_count, Texture* texture);
 
-// --- 3D ---------------------------------------------------------------------------------------
+// --- Meshes -----------------------------------------------------------------------------------
 //
-// Matrices are row-major float[16] transforming column vectors, right-handed, depth in [0, 1] : see
-// math/math3d.h, which builds them. A frame with 3D content looks like :
-//
-//     begin_shadow_pass(shadow_map, light_view_projection);  // outside begin_frame()/end_frame()
-//     draw_mesh(mesh, model);                                 // ... every shadow caster
-//     end_shadow_pass();
-//
-//     begin_frame();
-//     begin_scene(&lighting, shadow_map);                     // forward pass, depth-tested
-//     draw_mesh(mesh, model);                                 // ... every visible mesh
-//     end_scene();                                            // back to 2D : draw_vertices(), UI...
-//     end_frame();
+// Static geometry, drawn by renderer/render3d through gpu.h. Matrices are row-major float[16]
+// transforming column vectors, right-handed, depth in [0, 1] : see math/math3d.h, which builds them.
 
 typedef struct
 {
@@ -81,53 +71,13 @@ typedef struct
     float nx, ny, nz;    // normal
     float r, g, b, a;    // albedo color
     float u, v;          // texture coordinates
-    float tx, ty, tz, tw; // tangent ; w = bitangent sign (the photoreal renderer's normal mapping)
+    float tx, ty, tz, tw; // tangent ; w = bitangent sign, for normal mapping
 } MeshVertex;
 
-typedef struct Mesh Mesh;           // opaque static GPU geometry (vertices + 32-bit indices)
-typedef struct ShadowMap ShadowMap; // opaque square depth texture, rendered from the light's point of view
-
-typedef struct
-{
-    float view_projection[16];       // camera
-    float light_view_projection[16]; // must be the one the shadow map was rendered with
-    float light_direction[3];        // world-space direction the light travels in, normalized
-    float light_color[3];
-    float ambient_color[3];          // ambient light from above (e.g. a skybox's sky irradiance)
-    float ground_color[3];           // ambient light from below (ground bounce) ; = ambient_color for a uniform ambient
-    float shadow_depth_bias;         // in light clip-space depth units (e.g. 0.001)
-    float shadow_normal_offset;      // world units the receiver is pushed along its normal before the lookup
-} SceneLighting;
+typedef struct Mesh Mesh; // opaque static GPU geometry (vertices + 32-bit indices)
 
 Mesh* create_mesh(const MeshVertex* vertices, int vertex_count, const uint32_t* indices, int index_count); // NULL on failure
 void destroy_mesh(Mesh*); // the GPU must be done with it (e.g. after wait_renderer_idle())
-
-ShadowMap* create_shadow_map(int size); // size x size depth texels ; NULL on failure
-void destroy_shadow_map(ShadowMap*);
-
-// Renders depth only into `shadow_map` : like begin_render_target_pass(), a self-contained,
-// synchronous unit of GPU work (submitted and waited on by end_shadow_pass()), so it must not be
-// called between begin_frame()/end_frame(), and the shadow map is ready to sample as soon as
-// end_shadow_pass() returns.
-int begin_shadow_pass(ShadowMap* shadow_map, const float light_view_projection[16]); // 0 on failure
-void end_shadow_pass(void);
-
-// Starts forward-shaded, depth-tested 3D drawing into the window : one directional light,
-// Lambert diffuse + ambient, shadows from `shadow_map` (3x3 PCF). Must be called between
-// begin_frame()/end_frame(), and matched by end_scene() before any draw_vertices() call.
-void begin_scene(const SceneLighting* lighting, ShadowMap* shadow_map);
-void end_scene(void);
-
-// Draws `mesh` transformed by `model` (row-major float[16]), in the current shadow pass or scene.
-void draw_mesh(Mesh* mesh, const float model[16]);
-void draw_mesh_colored(Mesh* mesh, const float model[16], const float color[3]); // one color, in place of the mesh's vertex colors
-void draw_mesh_range(Mesh* mesh, const float model[16], int first_index, int index_count); // part of its indices
-
-// Draws `equirectangular` (a 2:1 latitude/longitude panorama : U around the horizon, -Z at its
-// center, V from straight up to straight down) as the scene's background, scaled by `intensity`.
-// Between begin_scene()/end_scene() ; drawn at the far plane, only where no mesh is, so drawing it
-// after the meshes skips every covered pixel. See renderer/photoreal/environment.h to load one.
-void draw_skybox(Texture* equirectangular, float intensity);
 
 // Restricts subsequent draw_vertices() calls to the (x, y, width, height) pixel rectangle of the
 // current pass (window or render target), e.g. for clipped UI. Every begin_frame() and
@@ -138,7 +88,7 @@ void set_scissor(int x, int y, int width, int height);
 // --- Statistics (profiling) -------------------------------------------------------------------
 //
 // What the renderer knows about the last frames, for profilers. The counts cover everything drawn
-// between two end_frame() calls, synchronous passes (shadow maps, render targets) included. The GPU
+// between two end_frame() calls, synchronous passes (render targets) included. The GPU
 // time is measured with timestamp queries around the frame's command list only (not the synchronous
 // passes), a frame or two late, since the GPU runs behind the CPU.
 typedef struct
@@ -148,9 +98,9 @@ typedef struct
     float gpu_frame_ms;         // GPU time of the frame's command list ; < 0 if it can't be measured
     unsigned long long vram_used;   // bytes of video memory this process uses ; 0 if unknown
     unsigned long long vram_budget; // bytes the OS lets it use before trouble ; 0 if unknown
-    int draw_calls;             // every draw of the last frame : 2D batches, meshes, sky, GPU layer
+    int draw_calls;             // every draw of the last frame : 2D batches and GPU layer draws
     int vertices_2d;            // vertices sent through draw_vertices() (sprites, UI)
-    int mesh_draws;             // draw_mesh*() calls
+    int mesh_draws;             // gpu_draw_indexed() calls : meshes, shadow casters included
 } RendererStats;
 
 void renderer_get_stats(RendererStats* out_stats);

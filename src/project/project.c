@@ -40,10 +40,14 @@ void project_default_settings(ProjectSettings* s, ProjectTemplate template_kind)
     s->character_max_slope = 50.0f;
     s->character_mass = 75.0f;
 
-    s->render_path = template_kind == PROJECT_TEMPLATE_2D ? RENDER_PATH_FORWARD : RENDER_PATH_PHOTOREAL;
-    photoreal_default_look(&s->look);
+    s->render_path = template_kind == PROJECT_TEMPLATE_2D ? RENDER_PATH_2D : RENDER_PATH_DEFERRED_PLUS;
+    render3d_default_look(&s->look);
+    render2d_default_settings(&s->render_2d);
 
-    photoreal_default_quality(&s->quality);
+    render3d_default_quality(&s->quality);
+    bake_default_settings(&s->bake);
+    s->use_baked_lighting = 1;
+    s->occlusion_culling = 1;
     project_apply_quality_preset(s, QUALITY_HIGH);
 
     s->master_volume = 1.0f;
@@ -55,7 +59,7 @@ void project_default_settings(ProjectSettings* s, ProjectTemplate template_kind)
 
 void project_apply_quality_preset(ProjectSettings* settings, QualityPreset preset)
 {
-    PhotorealQuality* q = &settings->quality;
+    Render3DQuality* q = &settings->quality;
     settings->quality_preset = preset;
 
     switch (preset)
@@ -66,11 +70,14 @@ void project_apply_quality_preset(ProjectSettings* settings, QualityPreset prese
         q->shadow_cascades = 2;
         q->shadow_samples = 8;
         q->shadow_distance = 60.0f;
+        q->local_shadow_atlas = 2048;
+        q->local_shadow_lights = 4;
         q->ao_enabled = 0;
         q->ao_slices = 2;
         q->ao_steps = 3;
         q->bloom_enabled = 0;
         q->fxaa_enabled = 1;
+        q->msaa_samples = 1;
         break;
 
     case QUALITY_MEDIUM:
@@ -79,11 +86,14 @@ void project_apply_quality_preset(ProjectSettings* settings, QualityPreset prese
         q->shadow_cascades = 3;
         q->shadow_samples = 12;
         q->shadow_distance = 90.0f;
+        q->local_shadow_atlas = 4096;
+        q->local_shadow_lights = 8;
         q->ao_enabled = 1;
         q->ao_slices = 2;
         q->ao_steps = 3;
         q->bloom_enabled = 1;
         q->fxaa_enabled = 1;
+        q->msaa_samples = 2;
         break;
 
     case QUALITY_HIGH:
@@ -92,11 +102,14 @@ void project_apply_quality_preset(ProjectSettings* settings, QualityPreset prese
         q->shadow_cascades = 3;
         q->shadow_samples = 24;
         q->shadow_distance = 120.0f;
+        q->local_shadow_atlas = 4096;
+        q->local_shadow_lights = 12;
         q->ao_enabled = 1;
         q->ao_slices = 3;
         q->ao_steps = 5;
         q->bloom_enabled = 1;
         q->fxaa_enabled = 1;
+        q->msaa_samples = 4;
         break;
 
     case QUALITY_ULTRA:
@@ -105,16 +118,41 @@ void project_apply_quality_preset(ProjectSettings* settings, QualityPreset prese
         q->shadow_cascades = 4;
         q->shadow_samples = 32;
         q->shadow_distance = 200.0f;
+        q->local_shadow_atlas = 8192;
+        q->local_shadow_lights = 24;
         q->ao_enabled = 1;
         q->ao_slices = 4;
         q->ao_steps = 8;
         q->bloom_enabled = 1;
         q->fxaa_enabled = 1;
+        q->msaa_samples = 8;
         break;
 
     default:
         break;
     }
+
+    if (preset == QUALITY_CUSTOM)
+    {
+        return;
+    }
+
+    // Each pipeline's own anti-aliasing : MSAA for Forward+, TAA (sharpened) and reflections for Deferred+.
+    int deferred = settings->render_path == RENDER_PATH_DEFERRED_PLUS;
+    q->taa_enabled = deferred && preset != QUALITY_LOW;
+    q->sharpness = q->taa_enabled ? 0.4f : 0.0f;
+    q->fxaa_enabled = !q->taa_enabled && (deferred || q->msaa_samples <= 1);
+    q->ssr_enabled = deferred && preset != QUALITY_LOW;
+    q->ssr_steps = preset == QUALITY_ULTRA ? 48 : preset == QUALITY_HIGH ? 32 : 20;
+    q->volumetrics_enabled = preset != QUALITY_LOW;
+    q->volumetric_steps = preset == QUALITY_ULTRA ? 48 : preset == QUALITY_HIGH ? 24 : 16;
+    q->volumetric_local_lights = preset == QUALITY_HIGH || preset == QUALITY_ULTRA;
+
+    // Realtime GI : Deferred+'s, from High up (where the GPU traces rays) ; Forward+ relies on the bake.
+    q->gi_enabled = deferred && (preset == QUALITY_HIGH || preset == QUALITY_ULTRA);
+    q->gi_rays = preset == QUALITY_ULTRA ? 128 : 64;
+    q->gi_spacing = preset == QUALITY_ULTRA ? 1.0f : 1.5f;
+    q->gi_lights = preset == QUALITY_ULTRA ? 32 : 16;
 }
 
 // --- Writing ------------------------------------------------------------------------------------
@@ -208,20 +246,37 @@ int project_save(const Project* project)
     write_text(&w, "  \"character\": { \"speed\": %g, \"sprint\": %g, \"jump_speed\": %g, \"acceleration\": %g, \"air_control\": %g, \"max_slope\": %g, \"mass\": %g },\n",
         s->character_speed, s->character_sprint_multiplier, s->character_jump_speed, s->character_acceleration, s->character_air_control, s->character_max_slope, s->character_mass);
 
-    const PhotorealLook* l = &s->look;
+    static const char* const render_paths[] = { "deferred_plus", "forward_plus", "2d" };
+    const Render3DLook* l = &s->look;
     write_text(&w, "  \"rendering\": { \"path\": \"%s\", \"exposure_ev\": %g, \"tonemapper\": %d, \"bloom_strength\": %g, \"contrast\": %g, \"saturation\": %g, \"vignette\": %g, ",
-        s->render_path == RENDER_PATH_FORWARD ? "forward" : "photoreal", l->exposure_ev, (int)l->tonemapper, l->bloom_strength, l->contrast, l->saturation, l->vignette);
+        render_paths[SDL_clamp(s->render_path, 0, 2)], l->exposure_ev, (int)l->tonemapper, l->bloom_strength, l->contrast, l->saturation, l->vignette);
     write_text(&w, "\"ao_radius\": %g, \"ao_power\": %g, \"sky_intensity\": %g, \"bounce_strength\": %g, \"sun_softness\": %g, ",
         l->ao_radius, l->ao_power, l->sky_intensity, l->bounce_strength, l->sun_softness);
-    write_text(&w, "\"fog_density\": %g, \"fog_height_falloff\": %g, \"fog_base_height\": %g, \"fog_color\": [%g, %g, %g], \"fog_sun_color\": [%g, %g, %g], \"fog_sun_power\": %g },\n",
+    write_text(&w, "\"fog_density\": %g, \"fog_height_falloff\": %g, \"fog_base_height\": %g, \"fog_color\": [%g, %g, %g], \"fog_sun_color\": [%g, %g, %g], \"fog_sun_power\": %g, ",
         l->fog_density, l->fog_height_falloff, l->fog_base_height, l->fog_color[0], l->fog_color[1], l->fog_color[2],
         l->fog_sun_color[0], l->fog_sun_color[1], l->fog_sun_color[2], l->fog_sun_power);
+    write_text(&w, "\"ssr_distance\": %g, \"ssr_thickness\": %g, \"volumetric_distance\": %g, \"volumetric_anisotropy\": %g, \"volumetric_intensity\": %g },\n",
+        l->ssr_distance, l->ssr_thickness, l->volumetric_distance, l->volumetric_anisotropy, l->volumetric_intensity);
 
-    const PhotorealQuality* q = &s->quality;
+    const Render2DSettings* r2 = &s->render_2d;
+    write_text(&w, "  \"rendering_2d\": { \"pixel_perfect\": %d, \"pixel_height\": %d, \"background\": [%g, %g, %g, %g] },\n",
+        r2->pixel_perfect, r2->pixel_height, r2->background[0], r2->background[1], r2->background[2], r2->background[3]);
+
+    const Render3DQuality* q = &s->quality;
     write_text(&w, "  \"quality\": { \"preset\": %d, \"render_scale\": %g, \"shadow_resolution\": %d, \"shadow_cascades\": %d, \"shadow_samples\": %d, \"shadow_distance\": %g, ",
         s->quality_preset, q->render_scale, q->shadow_resolution, q->shadow_cascades, q->shadow_samples, q->shadow_distance);
-    write_text(&w, "\"ao\": %d, \"ao_slices\": %d, \"ao_steps\": %d, \"bloom\": %d, \"fxaa\": %d },\n",
-        q->ao_enabled, q->ao_slices, q->ao_steps, q->bloom_enabled, q->fxaa_enabled);
+    write_text(&w, "\"local_shadow_atlas\": %d, \"local_shadow_lights\": %d, ", q->local_shadow_atlas, q->local_shadow_lights);
+    write_text(&w, "\"ao\": %d, \"ao_slices\": %d, \"ao_steps\": %d, \"bloom\": %d, \"fxaa\": %d, \"msaa\": %d, ",
+        q->ao_enabled, q->ao_slices, q->ao_steps, q->bloom_enabled, q->fxaa_enabled, q->msaa_samples);
+    write_text(&w, "\"taa\": %d, \"sharpness\": %g, \"ssr\": %d, \"ssr_steps\": %d, ", q->taa_enabled, q->sharpness, q->ssr_enabled, q->ssr_steps);
+    write_text(&w, "\"volumetrics\": %d, \"volumetric_steps\": %d, \"volumetric_lights\": %d, ",
+        q->volumetrics_enabled, q->volumetric_steps, q->volumetric_local_lights);
+    write_text(&w, "\"gi\": %d, \"gi_rays\": %d, \"gi_spacing\": %g, \"gi_lights\": %d },\n", q->gi_enabled, q->gi_rays, q->gi_spacing, q->gi_lights);
+
+    const BakeSettings* b = &s->bake;
+    write_text(&w, "  \"baking\": { \"use\": %d, \"culling\": %d, \"texels_per_meter\": %g, \"page_size\": %d, \"samples\": %d, \"bounces\": %d, ",
+        s->use_baked_lighting, s->occlusion_culling, b->texels_per_meter, b->page_size, b->samples, b->bounces);
+    write_text(&w, "\"probe_spacing\": %g, \"probe_rays\": %d, \"culling_cell\": %g },\n", b->probe_spacing, b->probe_rays, b->culling_cell);
 
     write_text(&w, "  \"audio\": { \"master\": %g, \"music\": %g, \"sound\": %g }\n}\n", s->master_volume, s->music_volume, s->sound_volume);
 
@@ -369,17 +424,33 @@ int project_open(const char* path, Project* out_project)
     s->character_mass = read_float(character, "mass", s->character_mass);
 
     const JsonValue* rendering = json_object_get(root, "rendering");
-    PhotorealLook* l = &s->look;
+    Render3DLook* l = &s->look;
     const char* render_path = json_string(json_object_get(rendering, "path"), "");
 
     if (render_path[0] != '\0') // absent : the template's default stays
     {
-        // Anything else, the former "path_traced" included, is the photorealistic renderer.
-        s->render_path = SDL_strcmp(render_path, "forward") == 0 ? RENDER_PATH_FORWARD : RENDER_PATH_PHOTOREAL;
+        if (SDL_strcmp(render_path, "forward_plus") == 0)
+        {
+            s->render_path = RENDER_PATH_FORWARD_PLUS;
+        }
+        else if (SDL_strcmp(render_path, "2d") == 0)
+        {
+            s->render_path = RENDER_PATH_2D;
+        }
+        else if (SDL_strcmp(render_path, "forward") == 0)
+        {
+            // The former simple forward renderer : what 2D projects used, and the cheap 3D option.
+            s->render_path = out_project->template_kind == PROJECT_TEMPLATE_2D ? RENDER_PATH_2D : RENDER_PATH_FORWARD_PLUS;
+        }
+        else
+        {
+            // "deferred_plus", and what it replaced : "photoreal", "path_traced".
+            s->render_path = RENDER_PATH_DEFERRED_PLUS;
+        }
     }
 
     l->exposure_ev = read_float(rendering, "exposure_ev", l->exposure_ev);
-    l->tonemapper = (PhotorealTonemapper)read_int(rendering, "tonemapper", (int)l->tonemapper);
+    l->tonemapper = (Render3DTonemapper)read_int(rendering, "tonemapper", (int)l->tonemapper);
     l->bloom_strength = read_float(rendering, "bloom_strength", l->bloom_strength);
     l->contrast = read_float(rendering, "contrast", l->contrast);
     l->saturation = read_float(rendering, "saturation", l->saturation);
@@ -395,10 +466,24 @@ int project_open(const char* path, Project* out_project)
     read_floats(json_object_get(rendering, "fog_color"), l->fog_color, 3);
     read_floats(json_object_get(rendering, "fog_sun_color"), l->fog_sun_color, 3);
     l->fog_sun_power = read_float(rendering, "fog_sun_power", l->fog_sun_power);
+    l->ssr_distance = SDL_max(0.5f, read_float(rendering, "ssr_distance", l->ssr_distance));
+    l->ssr_thickness = SDL_max(0.01f, read_float(rendering, "ssr_thickness", l->ssr_thickness));
+    l->volumetric_distance = SDL_max(1.0f, read_float(rendering, "volumetric_distance", l->volumetric_distance));
+    l->volumetric_anisotropy = SDL_clamp(read_float(rendering, "volumetric_anisotropy", l->volumetric_anisotropy), -0.95f, 0.95f);
+    l->volumetric_intensity = SDL_max(0.0f, read_float(rendering, "volumetric_intensity", l->volumetric_intensity));
 
+    const JsonValue* rendering_2d = json_object_get(root, "rendering_2d");
+    Render2DSettings* r2 = &s->render_2d;
+    r2->pixel_perfect = read_int(rendering_2d, "pixel_perfect", r2->pixel_perfect);
+    r2->pixel_height = SDL_clamp(read_int(rendering_2d, "pixel_height", r2->pixel_height), 16, 4096);
+    read_floats(json_object_get(rendering_2d, "background"), r2->background, 4);
+
+    // The preset again, now that the render path is known (it picks the anti-aliasing) : settings saved
+    // before some of these existed keep sensible values for them.
     const JsonValue* quality = json_object_get(root, "quality");
-    PhotorealQuality* q = &s->quality;
+    Render3DQuality* q = &s->quality;
     s->quality_preset = SDL_clamp(read_int(quality, "preset", s->quality_preset), 0, QUALITY_PRESET_COUNT - 1);
+    project_apply_quality_preset(s, (QualityPreset)s->quality_preset);
     q->render_scale = read_float(quality, "render_scale", q->render_scale);
     q->shadow_resolution = SDL_clamp(read_int(quality, "shadow_resolution", q->shadow_resolution), 256, 8192);
     q->shadow_cascades = SDL_clamp(read_int(quality, "shadow_cascades", q->shadow_cascades), 1, 4);
@@ -409,6 +494,32 @@ int project_open(const char* path, Project* out_project)
     q->ao_steps = SDL_clamp(read_int(quality, "ao_steps", q->ao_steps), 1, 16);
     q->bloom_enabled = read_int(quality, "bloom", q->bloom_enabled);
     q->fxaa_enabled = read_int(quality, "fxaa", q->fxaa_enabled);
+    q->local_shadow_atlas = SDL_clamp(read_int(quality, "local_shadow_atlas", q->local_shadow_atlas), 1024, 8192);
+    q->local_shadow_lights = SDL_clamp(read_int(quality, "local_shadow_lights", q->local_shadow_lights), 0, 32);
+    q->msaa_samples = SDL_clamp(read_int(quality, "msaa", q->msaa_samples), 1, 8);
+    q->taa_enabled = read_int(quality, "taa", q->taa_enabled);
+    q->sharpness = SDL_clamp(read_float(quality, "sharpness", q->sharpness), 0.0f, 1.0f);
+    q->ssr_enabled = read_int(quality, "ssr", q->ssr_enabled);
+    q->ssr_steps = SDL_clamp(read_int(quality, "ssr_steps", q->ssr_steps), 4, 128);
+    q->volumetrics_enabled = read_int(quality, "volumetrics", q->volumetrics_enabled);
+    q->volumetric_steps = SDL_clamp(read_int(quality, "volumetric_steps", q->volumetric_steps), 4, 128);
+    q->volumetric_local_lights = read_int(quality, "volumetric_lights", q->volumetric_local_lights);
+    q->gi_enabled = read_int(quality, "gi", q->gi_enabled);
+    q->gi_rays = SDL_clamp(read_int(quality, "gi_rays", q->gi_rays), 16, 256);
+    q->gi_spacing = SDL_clamp(read_float(quality, "gi_spacing", q->gi_spacing), 0.25f, 16.0f);
+    q->gi_lights = SDL_clamp(read_int(quality, "gi_lights", q->gi_lights), 0, 256);
+
+    const JsonValue* baking = json_object_get(root, "baking");
+    BakeSettings* b = &s->bake;
+    s->use_baked_lighting = read_int(baking, "use", s->use_baked_lighting);
+    s->occlusion_culling = read_int(baking, "culling", s->occlusion_culling);
+    b->texels_per_meter = SDL_clamp(read_float(baking, "texels_per_meter", b->texels_per_meter), 0.25f, 64.0f);
+    b->page_size = SDL_clamp(read_int(baking, "page_size", b->page_size), 256, 4096);
+    b->samples = SDL_clamp(read_int(baking, "samples", b->samples), 8, 4096);
+    b->bounces = SDL_clamp(read_int(baking, "bounces", b->bounces), 1, 8);
+    b->probe_spacing = SDL_clamp(read_float(baking, "probe_spacing", b->probe_spacing), 0.0f, 16.0f);
+    b->probe_rays = SDL_clamp(read_int(baking, "probe_rays", b->probe_rays), 16, 4096);
+    b->culling_cell = SDL_clamp(read_float(baking, "culling_cell", b->culling_cell), 0.0f, 64.0f);
 
     const JsonValue* audio = json_object_get(root, "audio");
     s->master_volume = read_float(audio, "master", s->master_volume);

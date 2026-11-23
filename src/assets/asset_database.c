@@ -10,7 +10,7 @@
 
 #include "assets/hdr_image.h"
 #include "platforms/platforms_paths.h"
-#include "renderer/photoreal/pbr_texture.h"
+#include "renderer/render3d/pbr_texture.h"
 #include "scene/scene.h"
 #include "debug.h"
 
@@ -250,6 +250,7 @@ static void release(CacheEntry* entry)
         }
 
         SDL_free(model->textures);
+        SDL_free(model->texture_info);
         SDL_free(model->materials);
         destroy_mesh(model->mesh);
         model_free(&model->data);
@@ -478,7 +479,8 @@ static Texture* model_texture(LoadedModel* model, int index, int srgb)
     if (!model->textures[index])
     {
         const ModelTexture* source = &model->data.textures[index];
-        model->textures[index] = source->data ? pbr_texture_load_memory(source->data, source->size, srgb) : pbr_texture_load(source->path, srgb);
+        model->textures[index] = source->data ? pbr_texture_load_memory(source->data, source->size, srgb) :
+            pbr_texture_load_info(source->path, srgb, &model->texture_info[index]);
     }
 
     return model->textures[index];
@@ -498,6 +500,7 @@ const LoadedModel* asset_get_model(const char* path)
 
     LoadedModel* model = SDL_calloc(1, sizeof(LoadedModel));
     cached = add_cached(path, CACHE_MODEL);
+    Uint64 start = SDL_GetTicks();
 
     if (!model_load(absolute, &model->data))
     {
@@ -521,6 +524,7 @@ const LoadedModel* asset_get_model(const char* path)
     }
 
     model->textures = SDL_calloc((size_t)SDL_max(1, model->data.texture_count), sizeof(Texture*));
+    model->texture_info = SDL_calloc((size_t)SDL_max(1, model->data.texture_count), sizeof(PbrTextureInfo));
     model->materials = SDL_malloc(sizeof(PbrMaterial) * (size_t)SDL_max(1, model->data.material_count));
 
     for (int i = 0; i < model->data.material_count; i++)
@@ -528,7 +532,7 @@ const LoadedModel* asset_get_model(const char* path)
         const ModelMaterial* source = &model->data.materials[i];
         PbrMaterial* material = &model->materials[i];
 
-        photoreal_default_material(material);
+        render3d_default_material(material);
         material->metallic = source->metallic;
         material->roughness = source->roughness;
         material->normal_scale = source->normal_scale;
@@ -542,9 +546,24 @@ const LoadedModel* asset_get_model(const char* path)
         material->normal_texture = model_texture(model, source->normal_texture, 0);
         material->metallic_roughness_texture = model_texture(model, source->metallic_roughness_texture, 0);
         material->occlusion_texture = model_texture(model, source->occlusion_texture, 0);
+
+        if (source->normal_texture != MODEL_NO_TEXTURE)
+        {
+            material->normal_y_down = model->texture_info[source->normal_texture].normal_y_down;
+        }
+
+        // Foliage and the like : a cutout, when the file can't say and the base color's alpha does.
+        if (source->alpha_from_texture && material->alpha_cutoff <= 0.0f && source->base_color_texture != MODEL_NO_TEXTURE &&
+            model->texture_info[source->base_color_texture].alpha_mask)
+        {
+            material->alpha_cutoff = 0.5f;
+        }
     }
 
     cached->data = model;
+
+    DEBUG_LOG("[assets] model \"%s\" ready in %llu ms (%d submeshes, %d textures)\n", path, (unsigned long long)(SDL_GetTicks() - start),
+        model->data.submesh_count, model->data.texture_count);
 
     return model;
 }

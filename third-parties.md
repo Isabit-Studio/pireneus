@@ -56,6 +56,12 @@ Bundled inside those libraries, and therefore in the binary:
 | --- | --- | --- |
 | `resources/2D-test/roguelikeSheet_transparent.png` | [Kenney](https://kenney.nl/), *Roguelike* pack | CC0 1.0 (public domain) |
 
+### Downloaded separately (not in the repository)
+
+| Asset | Author | License | Used by |
+| --- | --- | --- | --- |
+| [Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) v5.2, in `resources/3D-test/Bistro_v5_2/` | Amazon Lumberyard, NVIDIA ORCA | CC BY 4.0 (its HDR sky: CC0, from Poly Haven) | The `demos/Bistro` project |
+
 The other files in `resources/` are Isabit Studio content. The Blender test scenes and the primitives
 are covered by the repository's MIT license.
 

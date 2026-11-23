@@ -14,8 +14,8 @@ extern "C" {
 // call edit_mesh_gpu_end_frame() once per frame, so that what's no longer drawn is released, a few frames
 // later, once the GPU can't be using it any more.
 //
-// Vertex colors are the materials' flat colors (asset_material_color()), for the forward renderer ;
-// the photorealistic one ignores them and samples the materials' textures.
+// Vertex colors are the materials' flat colors (asset_material_color()) ; the 3D renderer ignores them
+// (PbrMaterial::ignore_vertex_color) and samples the materials' textures.
 
 typedef struct
 {
@@ -30,6 +30,14 @@ typedef struct
     EditMeshGpuPart* parts;
     int part_count;
     float bounds[6];
+
+    // The same geometry on the CPU, for baking (bake/bake.h) : the GPU mesh's vertices and indices, and
+    // the face each vertex belongs to (a face is a lightmap chart).
+    const MeshVertex* vertices;
+    int vertex_count;
+    const uint32_t* indices;
+    int index_count;
+    const int* vertex_faces;
 } EditMeshGpu;
 
 const EditMeshGpu* edit_mesh_gpu_get(uint32_t handle); // NULL if the handle is unknown

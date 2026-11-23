@@ -33,9 +33,15 @@ add_subdirectory(third-parties)
 
 add_library(pireneus STATIC
     src/renderer/sprite_batch.c
-    src/renderer/photoreal/photoreal.c
-    src/renderer/photoreal/environment.c
-    src/renderer/photoreal/pbr_texture.c
+    src/renderer/render3d/render3d.c
+    src/renderer/render3d/forward_plus.c
+    src/renderer/render3d/deferred_plus.c
+    src/renderer/render3d/render3d_lights.c
+    src/renderer/render3d/render3d_gi.c
+    src/renderer/render3d/environment.c
+    src/renderer/render3d/pbr_texture.c
+    src/renderer/render2d/render2d.c
+    src/bake/bake.c
     src/assets/hdr_image.c
     src/assets/tinyexr_impl.cpp
     src/assets/asset_database.c

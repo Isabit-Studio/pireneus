@@ -241,95 +241,6 @@ void destroy_mesh(Mesh* mesh)
     }
 }
 
-ShadowMap* create_shadow_map(int size)
-{
-    if (size <= 0)
-    {
-        return NULL;
-    }
-
-    return backend->create_shadow_map(size);
-}
-
-void destroy_shadow_map(ShadowMap* shadow_map)
-{
-    if (shadow_map)
-    {
-        backend->destroy_shadow_map(shadow_map);
-    }
-}
-
-int begin_shadow_pass(ShadowMap* shadow_map, const float light_view_projection[16])
-{
-    if (!shadow_map || !light_view_projection)
-    {
-        return 0;
-    }
-
-    return backend->begin_shadow_pass(shadow_map, light_view_projection);
-}
-
-void end_shadow_pass(void)
-{
-    backend->end_shadow_pass();
-}
-
-void begin_scene(const SceneLighting* lighting, ShadowMap* shadow_map)
-{
-    backend->begin_scene(lighting, shadow_map);
-}
-
-void end_scene(void)
-{
-    backend->end_scene();
-}
-
-// A model matrix is affine : its bottom row, always (0, 0, 0, 1), carries the color to the shader
-// instead, at no cost in constants (they're full, see mesh_constants.h).
-static void draw_mesh_with(Mesh* mesh, const float model[16], float r, float g, float b, float vertex_colors, int first_index, int index_count)
-{
-    if (mesh && model)
-    {
-        float packed[16];
-        SDL_memcpy(packed, model, sizeof(float) * 12);
-        packed[12] = r;
-        packed[13] = g;
-        packed[14] = b;
-        packed[15] = vertex_colors;
-
-        counting.draw_calls++;
-        counting.mesh_draws++;
-        backend->draw_mesh(mesh, packed, first_index, index_count);
-    }
-}
-
-void draw_mesh(Mesh* mesh, const float model[16])
-{
-    draw_mesh_with(mesh, model, 1.0f, 1.0f, 1.0f, 1.0f, 0, -1);
-}
-
-void draw_mesh_colored(Mesh* mesh, const float model[16], const float color[3])
-{
-    draw_mesh_with(mesh, model, color[0], color[1], color[2], 0.0f, 0, -1);
-}
-
-void draw_mesh_range(Mesh* mesh, const float model[16], int first_index, int index_count)
-{
-    if (index_count > 0)
-    {
-        draw_mesh_with(mesh, model, 1.0f, 1.0f, 1.0f, 1.0f, first_index, index_count);
-    }
-}
-
-void draw_skybox(Texture* equirectangular, float intensity)
-{
-    if (equirectangular)
-    {
-        counting.draw_calls++;
-        backend->draw_skybox(equirectangular, intensity);
-    }
-}
-
 int gpu_supported(void)
 {
     return backend->gpu_supported();
@@ -427,9 +338,27 @@ int gpu_raytracing_supported(void)
     return backend->gpu_raytracing_supported();
 }
 
+int gpu_format_supported(GpuFormat format)
+{
+    return backend->gpu_format_supported(format);
+}
+
 uint32_t gpu_build_ray_scene(const GpuRayInstance* instances, int count)
 {
     return backend->gpu_build_ray_scene(instances, count);
+}
+
+int gpu_read_texture(Texture* texture, void* out_pixels, size_t size)
+{
+    return texture && out_pixels ? backend->gpu_read_texture(texture, out_pixels, size) : 0;
+}
+
+void gpu_set_viewport(int x, int y, int width, int height)
+{
+    if (width > 0 && height > 0)
+    {
+        backend->gpu_set_viewport(x, y, width, height);
+    }
 }
 
 void gpu_draw_indexed(Mesh* mesh, int first_index, int index_count)
@@ -437,6 +366,7 @@ void gpu_draw_indexed(Mesh* mesh, int first_index, int index_count)
     if (mesh && index_count > 0)
     {
         counting.draw_calls++;
+        counting.mesh_draws++;
         backend->gpu_draw_indexed(mesh, first_index, index_count);
     }
 }

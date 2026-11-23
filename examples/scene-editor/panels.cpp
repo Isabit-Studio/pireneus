@@ -4,7 +4,7 @@
 
 #include "example.h"
 #include "platforms/platforms_input.h"
-#include "renderer/photoreal/photoreal.h"
+#include "renderer/render3d/render3d.h"
 
 #define PALETTE_ICON_SIZE 30.0f
 
@@ -161,6 +161,21 @@ void editor_draw_main_menu(void)
                 editor_add_object("Empty");
             }
 
+            if (ImGui::MenuItem(ICON_LIGHTBULB "  Point Light"))
+            {
+                editor_add_light(SCENE_LIGHT_POINT);
+            }
+
+            if (ImGui::MenuItem(ICON_FLASHLIGHT "  Spot Light"))
+            {
+                editor_add_light(SCENE_LIGHT_SPOT);
+            }
+
+            if (ImGui::MenuItem(ICON_GLOBE "  Reflection Probe"))
+            {
+                editor_add_reflection_probe();
+            }
+
             ImGui::Separator();
 
             if (ImGui::BeginMenu(ICON_BRICK "  Mesh (level geometry)"))
@@ -191,6 +206,12 @@ void editor_draw_main_menu(void)
                 }
             }
 
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Lighting"))
+        {
+            lighting_draw_menu();
             ImGui::EndMenu();
         }
 
@@ -369,6 +390,23 @@ void editor_draw_view_panel(void)
         ImGui::SliderFloat("Sun intensity", &scene->sun_intensity, 0.0f, 3.0f, "%.2f");
         edited |= ImGui::IsItemActivated();
 
+        ImGui::SeparatorText("Clouds");
+        SceneClouds* clouds = &scene->clouds;
+        ImGui::SliderFloat("Coverage", &clouds->coverage, 0.0f, 1.0f, "%.2f");
+        edited |= ImGui::IsItemActivated();
+        ImGui::BeginDisabled(clouds->coverage <= 0.0f);
+        ImGui::SliderFloat("Density", &clouds->density, 0.05f, 2.0f, "%.2f");
+        edited |= ImGui::IsItemActivated();
+        ImGui::DragFloat("Altitude", &clouds->altitude, 10.0f, 50.0f, 10000.0f, "%.0f m");
+        edited |= ImGui::IsItemActivated();
+        ImGui::DragFloat("Scale", &clouds->scale, 5.0f, 20.0f, 20000.0f, "%.0f m");
+        edited |= ImGui::IsItemActivated();
+        ImGui::DragFloat2("Wind", clouds->wind, 0.1f, -100.0f, 100.0f, "%.1f m/s");
+        edited |= ImGui::IsItemActivated();
+        ImGui::SliderFloat("Shadows", &clouds->shadows, 0.0f, 1.0f, "%.2f");
+        edited |= ImGui::IsItemActivated();
+        ImGui::EndDisabled();
+
         if (edited)
         {
             editor_begin_edit();
@@ -433,6 +471,16 @@ static const char* object_icon(const SceneObject* object)
     if (object->model[0])
     {
         return ICON_BOX;
+    }
+
+    if (object->light_type != SCENE_LIGHT_NONE)
+    {
+        return object->light_type == SCENE_LIGHT_SPOT ? ICON_FLASHLIGHT : ICON_LIGHTBULB;
+    }
+
+    if (object->reflection_probe)
+    {
+        return ICON_GLOBE;
     }
 
     return object->audio[0] ? ICON_VOLUME : ICON_CIRCLE;
@@ -655,7 +703,7 @@ void editor_draw_inspector(void)
             ImGui::TextDisabled("Edit it with the Level panel : 1 2 3 = vertices, edges, faces.");
         }
     }
-    else if (object->model[0] || (!object->sprite[0] && !object->is_2d))
+    else if (object->model[0] || (!object->sprite[0] && !object->is_2d && object->light_type == SCENE_LIGHT_NONE && !object->reflection_probe))
     {
         if (ImGui::CollapsingHeader("Model", ImGuiTreeNodeFlags_DefaultOpen))
         {
@@ -790,6 +838,92 @@ void editor_draw_inspector(void)
         }
     }
 
+    if (object->light_type != SCENE_LIGHT_NONE)
+    {
+        if (component_header("Light", &remove))
+        {
+            static const char* const types[] = { "Point", "Spot" };
+            int type = object->light_type - SCENE_LIGHT_POINT;
+
+            if (ImGui::Combo("Type", &type, types, 2))
+            {
+                editor_begin_edit();
+                object->light_type = SCENE_LIGHT_POINT + type;
+            }
+
+            ImGui::ColorEdit3("Color", object->light_color);
+            edit_started |= ImGui::IsItemActivated();
+            ImGui::DragFloat("Intensity", &object->light_intensity, 0.1f, 0.0f, 100000.0f, "%.2f");
+            edit_started |= ImGui::IsItemActivated();
+            ImGui::SetItemTooltip("The irradiance at 1 m, in the sun's units");
+            ImGui::DragFloat("Range", &object->light_range, 0.05f, 0.1f, 1000.0f, "%.2f m");
+            edit_started |= ImGui::IsItemActivated();
+
+            if (object->light_type == SCENE_LIGHT_SPOT)
+            {
+                ImGui::SliderFloat("Angle", &object->light_spot_angle, 1.0f, 170.0f, "%.0f deg");
+                edit_started |= ImGui::IsItemActivated();
+                ImGui::SliderFloat("Softness", &object->light_spot_softness, 0.0f, 1.0f);
+                edit_started |= ImGui::IsItemActivated();
+                ImGui::TextDisabled("Points along the object's -Y.");
+            }
+
+            bool shadows = object->light_shadows != 0;
+
+            if (ImGui::Checkbox("Cast shadows", &shadows))
+            {
+                editor_begin_edit();
+                object->light_shadows = shadows;
+            }
+
+            static const char* const modes[] = { "Realtime", "Mixed", "Baked" };
+
+            if (ImGui::Combo("Mode", &object->light_mode, modes, 3))
+            {
+                editor_begin_edit();
+            }
+
+            ImGui::SetItemTooltip("Realtime : nothing baked. Mixed : direct light live, bounces baked.\n"
+                "Baked : all in the lightmaps and probes (Lighting > Bake), free at runtime.");
+        }
+
+        if (remove)
+        {
+            editor_begin_edit();
+            object->light_type = SCENE_LIGHT_NONE;
+            remove = false;
+        }
+    }
+
+    if (object->reflection_probe)
+    {
+        if (component_header("Reflection Probe", &remove))
+        {
+            ImGui::DragFloat3("Box size", object->probe_box, 0.05f, 0.1f, 1000.0f, "%.2f m");
+            edit_started |= ImGui::IsItemActivated();
+            ImGui::SetItemTooltip("What reflects it, and the walls its reflections are projected on (centered, not rotated)");
+            ImGui::DragFloat("Blend", &object->probe_blend, 0.02f, 0.01f, 50.0f, "%.2f m");
+            edit_started |= ImGui::IsItemActivated();
+            static const char* const resolutions[] = { "64", "128", "256", "512" };
+            int resolution = object->probe_resolution <= 64 ? 0 : object->probe_resolution <= 128 ? 1 : object->probe_resolution <= 256 ? 2 : 3;
+
+            if (ImGui::Combo("Resolution", &resolution, resolutions, 4))
+            {
+                editor_begin_edit();
+                object->probe_resolution = 64 << resolution;
+            }
+
+            ImGui::TextDisabled("Captured by Lighting > Bake lighting.");
+        }
+
+        if (remove)
+        {
+            editor_begin_edit();
+            object->reflection_probe = 0;
+            remove = false;
+        }
+    }
+
     // An Audio Source added from the menu has no clip yet : it stays visible to receive one.
     static const SceneObject* audio_without_clip;
 
@@ -856,6 +990,18 @@ void editor_draw_inspector(void)
         {
             editor_begin_edit();
             object->override_material = 1;
+        }
+
+        if (ImGui::MenuItem("Light", NULL, false, object->light_type == SCENE_LIGHT_NONE))
+        {
+            editor_begin_edit();
+            object->light_type = SCENE_LIGHT_POINT;
+        }
+
+        if (ImGui::MenuItem("Reflection Probe", NULL, false, !object->reflection_probe))
+        {
+            editor_begin_edit();
+            object->reflection_probe = 1;
         }
 
         if (ImGui::MenuItem("Audio Source", NULL, false, !object->audio[0] && object != audio_without_clip))
@@ -1015,40 +1161,85 @@ void editor_draw_project_settings(void)
 
         if (ImGui::BeginTabItem("Rendering"))
         {
-            static const char* const paths[] = { "Photorealistic", "Simple forward" };
+            static const char* const paths[] = { "Deferred+", "Forward+", "2D" };
             static const char* const tonemappers[] = { "ACES", "Khronos Neutral", "Reinhard", "None" };
             int tonemapper = (int)s->look.tonemapper;
 
-            changed |= ImGui::Combo("Render path", &s->render_path, paths, 2);
-
-            ImGui::SeparatorText("Image");
-            changed |= ImGui::SliderFloat("Exposure (EV)", &s->look.exposure_ev, -5.0f, 5.0f, "%.2f");
-
-            if (ImGui::Combo("Tone mapper", &tonemapper, tonemappers, 4))
+            if (ImGui::Combo("Render path", &s->render_path, paths, 3))
             {
-                s->look.tonemapper = (PhotorealTonemapper)tonemapper;
+                // A preset means different things to each pipeline (MSAA or TAA...) : applied again.
+                if (s->quality_preset != QUALITY_CUSTOM)
+                {
+                    project_apply_quality_preset(s, (QualityPreset)s->quality_preset);
+                }
+
                 changed = true;
             }
 
-            changed |= ImGui::SliderFloat("Bloom", &s->look.bloom_strength, 0.0f, 0.3f, "%.3f");
-            changed |= ImGui::SliderFloat("Contrast", &s->look.contrast, 0.0f, 1.0f);
-            changed |= ImGui::SliderFloat("Saturation", &s->look.saturation, 0.0f, 2.0f);
-            changed |= ImGui::SliderFloat("Vignette", &s->look.vignette, 0.0f, 1.0f);
+            if (s->render_path == RENDER_PATH_2D)
+            {
+                ImGui::TextDisabled("Sprites only : 3D objects aren't drawn.");
 
-            ImGui::SeparatorText("Light");
-            changed |= ImGui::SliderFloat("Sky intensity", &s->look.sky_intensity, 0.0f, 4.0f);
-            changed |= ImGui::SliderFloat("Bounce light", &s->look.bounce_strength, 0.0f, 1.0f);
-            changed |= ImGui::SliderFloat("Sun softness", &s->look.sun_softness, 0.5f, 20.0f);
-            changed |= ImGui::SliderFloat("AO radius", &s->look.ao_radius, 0.05f, 5.0f, "%.2f m");
-            changed |= ImGui::SliderFloat("AO power", &s->look.ao_power, 0.2f, 4.0f);
+                ImGui::SeparatorText("2D");
+                bool pixel_perfect = s->render_2d.pixel_perfect != 0;
 
-            ImGui::SeparatorText("Fog");
-            changed |= ImGui::SliderFloat("Density", &s->look.fog_density, 0.0f, 0.2f, "%.4f");
-            changed |= ImGui::SliderFloat("Height falloff", &s->look.fog_height_falloff, 0.001f, 1.0f, "%.3f");
-            changed |= ImGui::DragFloat("Base height", &s->look.fog_base_height, 0.1f);
-            changed |= ImGui::ColorEdit3("Color", s->look.fog_color);
-            changed |= ImGui::ColorEdit3("Toward the sun", s->look.fog_sun_color);
-            changed |= ImGui::SliderFloat("Sun power", &s->look.fog_sun_power, 1.0f, 64.0f);
+                if (ImGui::Checkbox("Pixel perfect", &pixel_perfect))
+                {
+                    s->render_2d.pixel_perfect = pixel_perfect;
+                    changed = true;
+                }
+
+                ImGui::SetItemTooltip("Renders at a fixed height in pixels, scaled up by a whole factor (orthographic views).");
+
+                ImGui::BeginDisabled(!pixel_perfect);
+                changed |= ImGui::SliderInt("Pixel height", &s->render_2d.pixel_height, 90, 1080);
+                ImGui::EndDisabled();
+
+                changed |= ImGui::ColorEdit4("Background", s->render_2d.background);
+            }
+            else
+            {
+                ImGui::SeparatorText("Image");
+                changed |= ImGui::SliderFloat("Exposure (EV)", &s->look.exposure_ev, -5.0f, 5.0f, "%.2f");
+
+                if (ImGui::Combo("Tone mapper", &tonemapper, tonemappers, 4))
+                {
+                    s->look.tonemapper = (Render3DTonemapper)tonemapper;
+                    changed = true;
+                }
+
+                changed |= ImGui::SliderFloat("Bloom", &s->look.bloom_strength, 0.0f, 0.3f, "%.3f");
+                changed |= ImGui::SliderFloat("Contrast", &s->look.contrast, 0.0f, 1.0f);
+                changed |= ImGui::SliderFloat("Saturation", &s->look.saturation, 0.0f, 2.0f);
+                changed |= ImGui::SliderFloat("Vignette", &s->look.vignette, 0.0f, 1.0f);
+
+                ImGui::SeparatorText("Light");
+                changed |= ImGui::SliderFloat("Sky intensity", &s->look.sky_intensity, 0.0f, 4.0f);
+                changed |= ImGui::SliderFloat("Bounce light", &s->look.bounce_strength, 0.0f, 1.0f);
+                changed |= ImGui::SliderFloat("Sun softness", &s->look.sun_softness, 0.5f, 20.0f);
+                changed |= ImGui::SliderFloat("AO radius", &s->look.ao_radius, 0.05f, 5.0f, "%.2f m");
+                changed |= ImGui::SliderFloat("AO power", &s->look.ao_power, 0.2f, 4.0f);
+
+                ImGui::SeparatorText("Fog");
+                changed |= ImGui::SliderFloat("Density", &s->look.fog_density, 0.0f, 0.2f, "%.4f");
+                changed |= ImGui::SliderFloat("Height falloff", &s->look.fog_height_falloff, 0.001f, 1.0f, "%.3f");
+                changed |= ImGui::DragFloat("Base height", &s->look.fog_base_height, 0.1f);
+                changed |= ImGui::ColorEdit3("Color", s->look.fog_color);
+                changed |= ImGui::ColorEdit3("Toward the sun", s->look.fog_sun_color);
+                changed |= ImGui::SliderFloat("Sun power", &s->look.fog_sun_power, 1.0f, 64.0f);
+                ImGui::TextDisabled("With volumetrics (Quality), the fog scatters the lights.");
+                changed |= ImGui::SliderFloat("Volumetric range", &s->look.volumetric_distance, 5.0f, 500.0f, "%.0f m");
+                changed |= ImGui::SliderFloat("Anisotropy", &s->look.volumetric_anisotropy, -0.9f, 0.95f, "%.2f");
+                ImGui::SetItemTooltip("0 : light scatters evenly ; toward 1 : mostly forward, a glow around the lights and the sun");
+                changed |= ImGui::SliderFloat("Scattering", &s->look.volumetric_intensity, 0.0f, 4.0f, "%.2f");
+
+                if (s->render_path == RENDER_PATH_DEFERRED_PLUS)
+                {
+                    ImGui::SeparatorText("Reflections");
+                    changed |= ImGui::SliderFloat("Ray length", &s->look.ssr_distance, 1.0f, 200.0f, "%.1f m");
+                    changed |= ImGui::SliderFloat("Thickness", &s->look.ssr_thickness, 0.02f, 2.0f, "%.2f m");
+                }
+            }
 
             ImGui::EndTabItem();
         }
@@ -1064,7 +1255,7 @@ void editor_draw_project_settings(void)
             }
 
             bool quality_changed = false;
-            PhotorealQuality* q = &s->quality;
+            Render3DQuality* q = &s->quality;
             bool ao = q->ao_enabled != 0;
             bool bloom = q->bloom_enabled != 0;
             bool fxaa = q->fxaa_enabled != 0;
@@ -1086,6 +1277,20 @@ void editor_draw_project_settings(void)
             quality_changed |= ImGui::SliderInt("Samples", &q->shadow_samples, 4, 64);
             quality_changed |= ImGui::DragFloat("Distance", &q->shadow_distance, 1.0f, 10.0f, 2000.0f, "%.0f m");
 
+            ImGui::SeparatorText("Point and spot lights");
+            static const char* const atlases[] = { "1024", "2048", "4096", "8192" };
+            int atlas_index = q->local_shadow_atlas <= 1024 ? 0 : q->local_shadow_atlas <= 2048 ? 1 : q->local_shadow_atlas <= 4096 ? 2 : 3;
+
+            if (ImGui::Combo("Shadow atlas", &atlas_index, atlases, 4))
+            {
+                q->local_shadow_atlas = 1024 << atlas_index;
+                quality_changed = true;
+            }
+
+            ImGui::SetItemTooltip("8 x 8 tiles : one per spot light, six per point light");
+            quality_changed |= ImGui::SliderInt("Shadowed lights", &q->local_shadow_lights, 0, 32);
+            ImGui::SetItemTooltip("At most this many lights cast shadows at once : the most important in view");
+
             ImGui::SeparatorText("Effects");
 
             if (ImGui::Checkbox("Ambient occlusion", &ao)) { q->ao_enabled = ao; quality_changed = true; }
@@ -1094,11 +1299,87 @@ void editor_draw_project_settings(void)
             if (ImGui::Checkbox("Bloom", &bloom)) { q->bloom_enabled = bloom; quality_changed = true; }
             if (ImGui::Checkbox("FXAA", &fxaa)) { q->fxaa_enabled = fxaa; quality_changed = true; }
 
+            bool volumetrics = q->volumetrics_enabled != 0;
+            bool volumetric_lights = q->volumetric_local_lights != 0;
+            if (ImGui::Checkbox("Volumetric fog", &volumetrics)) { q->volumetrics_enabled = volumetrics; quality_changed = true; }
+            ImGui::SetItemTooltip("Light shafts and halos in the fog (Rendering > Fog : density above 0)");
+            quality_changed |= ImGui::SliderInt("Volumetric steps", &q->volumetric_steps, 4, 128);
+            if (ImGui::Checkbox("Lights in the fog", &volumetric_lights)) { q->volumetric_local_lights = volumetric_lights; quality_changed = true; }
+
+            bool taa = q->taa_enabled != 0;
+            if (ImGui::Checkbox("TAA", &taa)) { q->taa_enabled = taa; quality_changed = true; }
+            ImGui::SetItemTooltip("Temporal anti-aliasing : sub-pixel jitter, accumulated over frames");
+            quality_changed |= ImGui::SliderFloat("Sharpening", &q->sharpness, 0.0f, 1.0f, "%.2f");
+            ImGui::SetItemTooltip("Contrast adaptive sharpening of the final image (0 = off)");
+
+            if (s->render_path == RENDER_PATH_FORWARD_PLUS)
+            {
+                ImGui::SeparatorText("Forward+");
+                static const char* const msaa_modes[] = { "Off", "2x", "4x", "8x" };
+                int msaa_index = q->msaa_samples >= 8 ? 3 : q->msaa_samples >= 4 ? 2 : q->msaa_samples >= 2 ? 1 : 0;
+
+                if (ImGui::Combo("MSAA", &msaa_index, msaa_modes, 4))
+                {
+                    q->msaa_samples = msaa_index == 0 ? 1 : 1 << msaa_index;
+                    quality_changed = true;
+                }
+            }
+            else if (s->render_path == RENDER_PATH_DEFERRED_PLUS)
+            {
+                ImGui::SeparatorText("Deferred+");
+                bool ssr = q->ssr_enabled != 0;
+                if (ImGui::Checkbox("Screen-space reflections", &ssr)) { q->ssr_enabled = ssr; quality_changed = true; }
+                quality_changed |= ImGui::SliderInt("Reflection steps", &q->ssr_steps, 4, 128);
+            }
+
+            if (s->render_path != RENDER_PATH_2D)
+            {
+                ImGui::SeparatorText("Realtime global illumination");
+                bool gi = q->gi_enabled != 0;
+                bool supported = render3d_realtime_gi_supported() != 0;
+
+                ImGui::BeginDisabled(!supported);
+                if (ImGui::Checkbox("Realtime GI", &gi)) { q->gi_enabled = gi; quality_changed = true; }
+                ImGui::EndDisabled();
+                ImGui::SetItemTooltip(supported ? "Ray-traced probes, every frame : in place of the baked lighting" : "Needs a GPU with ray tracing");
+                quality_changed |= ImGui::SliderInt("Rays per probe", &q->gi_rays, 16, 256);
+                quality_changed |= ImGui::SliderFloat("Probe spacing", &q->gi_spacing, 0.25f, 8.0f, "%.2f m");
+                quality_changed |= ImGui::SliderInt("Bouncing lights", &q->gi_lights, 0, 64);
+            }
+
             if (quality_changed)
             {
                 s->quality_preset = QUALITY_CUSTOM;
                 changed = true;
             }
+
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem("Lighting"))
+        {
+            BakeSettings* b = &s->bake;
+            ImGui::TextWrapped("Baked with Lighting > Bake lighting : lightmaps on the editable meshes, probes for the rest, occlusion culling.");
+            ImGui::SeparatorText("Lightmaps");
+            changed |= ImGui::SliderFloat("Texels per meter", &b->texels_per_meter, 0.5f, 32.0f, "%.1f");
+            static const char* const page_sizes[] = { "256", "512", "1024", "2048", "4096" };
+            int page_index = b->page_size <= 256 ? 0 : b->page_size <= 512 ? 1 : b->page_size <= 1024 ? 2 : b->page_size <= 2048 ? 3 : 4;
+
+            if (ImGui::Combo("Page size", &page_index, page_sizes, 5))
+            {
+                b->page_size = 256 << page_index;
+                changed = true;
+            }
+
+            changed |= ImGui::SliderInt("Samples", &b->samples, 8, 1024);
+            changed |= ImGui::SliderInt("Bounces", &b->bounces, 1, 6);
+            ImGui::SeparatorText("Probe volume");
+            changed |= ImGui::SliderFloat("Spacing", &b->probe_spacing, 0.0f, 8.0f, "%.2f m");
+            ImGui::SetItemTooltip("Where there's geometry ; four times coarser elsewhere. 0 : no probes");
+            changed |= ImGui::SliderInt("Rays per probe", &b->probe_rays, 16, 1024);
+            ImGui::SeparatorText("Occlusion culling");
+            changed |= ImGui::SliderFloat("Cell size", &b->culling_cell, 0.0f, 32.0f, "%.1f m");
+            ImGui::SetItemTooltip("0 : no culling data");
 
             ImGui::EndTabItem();
         }

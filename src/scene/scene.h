@@ -10,7 +10,7 @@ extern "C" {
 #endif
 
 // A game scene : plain data, saved as JSON. Objects carry a transform and optional "components" (a
-// model, an editable mesh or a sprite, a material, a rigid body, a character controller, a sound), all
+// model, an editable mesh or a sprite, a material, a light, a rigid body, a character controller, a sound), all
 // stored flat in one struct, so that a whole scene can be copied with `=` for undo and for the play mode's
 // snapshot. Editable meshes are the exception : they're referred to by handle (see meshedit/edit_mesh.h).
 
@@ -38,6 +38,20 @@ typedef enum
     SCENE_COLLIDER_MESH     // 3D only, static bodies : the model's triangles
 } SceneColliderShape;
 
+typedef enum
+{
+    SCENE_LIGHT_NONE,
+    SCENE_LIGHT_POINT,
+    SCENE_LIGHT_SPOT
+} SceneLightType;
+
+typedef enum
+{
+    SCENE_LIGHT_REALTIME,   // lit and shadowed every frame, nothing baked
+    SCENE_LIGHT_MIXED,      // its direct light realtime, its bounces baked
+    SCENE_LIGHT_BAKED       // all baked : free at runtime, but static
+} SceneLightMode;
+
 typedef struct
 {
     char name[64];
@@ -64,6 +78,22 @@ typedef struct
     char normal_texture[SCENE_PATH_SIZE];
     char metallic_roughness_texture[SCENE_PATH_SIZE];
 
+    // Light : a point or spot light (the sun is the scene's). A spot points along the object's -Y.
+    int light_type;          // SceneLightType
+    float light_color[3];
+    float light_intensity;   // the irradiance it gives at 1 m, in the sun's units
+    float light_range;       // meters
+    float light_spot_angle;  // degrees : the cone's full angle
+    float light_spot_softness; // 0 to 1
+    int light_shadows;
+    int light_mode;          // SceneLightMode
+
+    // Reflection probe : a capture of the scene from here, baked, reflected by what's inside its box.
+    int reflection_probe;
+    float probe_box[3];      // the box's size, meters, centered on the object (not rotated)
+    float probe_blend;       // meters : the fade inside its walls
+    int probe_resolution;    // a capture face's size, texels
+
     // Physics
     int body_type;          // SceneBodyType
     int collider;           // SceneColliderShape
@@ -88,6 +118,17 @@ typedef struct
     int selected;
 } SceneObject;
 
+// The sky's procedural clouds (see renderer/render3d) : a drifting layer, and its shadows on the ground.
+typedef struct
+{
+    float coverage;         // 0 = clear, to 1 = overcast
+    float density;
+    float altitude;         // meters
+    float scale;            // meters : the size of their features
+    float wind[2];          // m/s, along X and Z
+    float shadows;          // 0 to 1 : how much they shade the ground
+} SceneClouds;
+
 typedef struct
 {
     SceneObject objects[SCENE_MAX_OBJECTS];
@@ -99,6 +140,15 @@ typedef struct
     float sun_pitch;        // radians, above the horizon
     float sun_intensity;    // relative to the sky's own sun
     int use_environment_sun; // take the sun's direction and color from the skybox, if it has one
+    SceneClouds clouds;
+
+    // Where the editor's camera was when the scene was saved (an orbit around `view_target`), so it
+    // reopens there. has_view = 0 : the editor's default view.
+    int has_view;
+    float view_target[3];
+    float view_yaw;         // radians, around +Y
+    float view_pitch;       // radians, above the horizon
+    float view_distance;
 } Scene;
 
 void scene_init(Scene* scene);

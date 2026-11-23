@@ -1,7 +1,7 @@
 // The editor : working on projects (see src/project). Scenes of models, editable meshes and sprites,
 // assets imported through the asset browser, rigid bodies and a character controller simulated in play mode,
-// rendered by the photorealistic renderer or the simple forward one, as the project's settings say. Level
-// editing (whiteboxing, after Valve's Hammer) is in level_editor.cpp.
+// rendered in Forward+, Deferred+ (renderer/render3d) or 2D (renderer/render2d), as the project's
+// settings say. Level editing (whiteboxing, after Valve's Hammer) is in level_editor.cpp.
 //
 // The 3D scene is drawn by the engine across the whole window. On top of it, a full-window, transparent
 // ImGui window ("viewport") hosts everything that interacts with the 3D view : ImGuizmo needs a real
@@ -33,7 +33,8 @@
 #include "platforms/platforms_input.h"
 #include "platforms/platforms_window.h"
 #include "meshedit/edit_mesh_gpu.h"
-#include "renderer/photoreal/photoreal.h"
+#include "renderer/render2d/render2d.h"
+#include "renderer/render3d/render3d.h"
 #include "renderer/renderer.h"
 #include "scene/scene_runtime.h"
 
@@ -58,7 +59,6 @@
 #define PLAY_LOOK_SENSITIVITY 0.003f
 
 #define MAX_UNDO_STEPS 64
-#define SHADOW_MAP_SIZE 2048
 
 const PrimitiveInfo primitive_infos[PRIMITIVE_COUNT] = {
     { "cube", "Cube", ICON_BOX },
@@ -101,6 +101,7 @@ typedef struct
     char skybox[SCENE_PATH_SIZE];
     float sun_yaw, sun_pitch, sun_intensity;
     int use_environment_sun;
+    SceneClouds clouds;
 } SceneSnapshot;
 
 typedef struct
@@ -141,11 +142,10 @@ static bool game_has_input;
 static Scene play_snapshot; // the scene as it was before pressing play, restored by stop
 
 // Rendering.
-static bool photoreal_ready;
+static bool render3d_ready;
 static Environment procedural_environment;
 static float procedural_sun[3];
 static bool procedural_valid;
-static ShadowMap* forward_shadow_map;
 
 void editor_set_status(const char* format, ...)
 {
@@ -177,6 +177,7 @@ static void copy_scene(Scene* to, const Scene* from)
     to->sun_pitch = from->sun_pitch;
     to->sun_intensity = from->sun_intensity;
     to->use_environment_sun = from->use_environment_sun;
+    to->clouds = from->clouds;
 }
 
 static void snapshot_free(SceneSnapshot* snapshot)
@@ -214,6 +215,7 @@ static void stack_push(SnapshotStack* stack, const Scene* state)
     snapshot->sun_pitch = state->sun_pitch;
     snapshot->sun_intensity = state->sun_intensity;
     snapshot->use_environment_sun = state->use_environment_sun;
+    snapshot->clouds = state->clouds;
 }
 
 static void restore_snapshot(const SceneSnapshot* snapshot)
@@ -226,6 +228,7 @@ static void restore_snapshot(const SceneSnapshot* snapshot)
     editor_scene.sun_pitch = snapshot->sun_pitch;
     editor_scene.sun_intensity = snapshot->sun_intensity;
     editor_scene.use_environment_sun = snapshot->use_environment_sun;
+    editor_scene.clouds = snapshot->clouds;
 }
 
 static int frame_number;          // counts update() calls
@@ -334,6 +337,41 @@ SceneObject* editor_add_object(const char* name)
     object->selected = 1;
     editor_scene.selected = editor_scene.count;
     editor_scene.count++;
+
+    return object;
+}
+
+SceneObject* editor_add_light(int light_type)
+{
+    SceneObject* object = editor_add_object(light_type == SCENE_LIGHT_SPOT ? "Spot Light" : "Point Light");
+
+    if (!object)
+    {
+        return NULL;
+    }
+
+    editor_drop_point(object->position);
+    object->position[1] += 2.0f;
+    object->is_2d = 0;
+    object->light_type = light_type;
+    object->light_shadows = 1;
+    editor_set_status("Added '%s'.", object->name);
+
+    return object;
+}
+
+SceneObject* editor_add_reflection_probe(void)
+{
+    SceneObject* object = editor_add_object("Reflection Probe");
+
+    if (object)
+    {
+        editor_drop_point(object->position);
+        object->position[1] += 1.5f;
+        object->is_2d = 0;
+        object->reflection_probe = 1;
+        editor_set_status("Added '%s' : Lighting > Bake (or Capture reflection probes) to see it.", object->name);
+    }
 
     return object;
 }
@@ -706,6 +744,29 @@ void editor_new_scene(void)
     editor_set_status("New scene.");
 }
 
+// The scene keeps the view it was saved with, and reopens there.
+static void store_scene_view(Scene* scene)
+{
+    scene->has_view = 1;
+    scene->view_target[0] = camera.target.x;
+    scene->view_target[1] = camera.target.y;
+    scene->view_target[2] = camera.target.z;
+    scene->view_yaw = camera.yaw;
+    scene->view_pitch = camera.pitch;
+    scene->view_distance = camera.distance;
+}
+
+static void apply_scene_view(const Scene* scene)
+{
+    if (scene->has_view)
+    {
+        camera.target = vec3(scene->view_target[0], scene->view_target[1], scene->view_target[2]);
+        camera.yaw = scene->view_yaw;
+        camera.pitch = scene->view_pitch;
+        camera.distance = SDL_max(0.05f, scene->view_distance);
+    }
+}
+
 void editor_save_scene(void)
 {
     if (playing)
@@ -713,6 +774,8 @@ void editor_save_scene(void)
         editor_set_status("Stop playing before saving.");
         return;
     }
+
+    store_scene_view(&editor_scene);
 
     char path[PROJECT_PATH_SIZE + ASSET_PATH_SIZE];
     asset_absolute_path(editor_scene_path, path, sizeof(path));
@@ -749,9 +812,11 @@ void editor_load_scene(const char* relative_path)
     }
 
     SDL_snprintf(editor_scene_path, sizeof(editor_scene_path), "%s", copy);
+    apply_scene_view(&editor_scene);
     stack_clear(&undo_stack);
     stack_clear(&redo_stack);
     level_editor_reset();
+    lighting_scene_loaded();
     editor_dirty = 0;
     editor_set_status("Loaded '%s' (%d objects).", copy, editor_scene.count);
 }
@@ -760,9 +825,10 @@ void editor_apply_settings(void)
 {
     const ProjectSettings* settings = &editor_project.settings;
 
-    if (photoreal_ready)
+    if (render3d_ready)
     {
-        photoreal_set_settings(&settings->quality, &settings->look);
+        render3d_set_settings(&settings->quality, &settings->look);
+        render3d_set_pipeline(settings->render_path == RENDER_PATH_FORWARD_PLUS ? RENDER3D_FORWARD_PLUS : RENDER3D_DEFERRED_PLUS);
     }
 
     audio_set_volumes(settings->master_volume, settings->music_volume, settings->sound_volume);
@@ -1041,6 +1107,27 @@ int editor_raycast(Vec3 origin, Vec3 direction, int filter, float* out_t, int* o
 
         const LoadedModel* model = object->model[0] ? asset_get_model(object->model) : NULL;
 
+        if (!model && (object->light_type != SCENE_LIGHT_NONE || object->reflection_probe))
+        {
+            if (filter == RAYCAST_ALL)
+            {
+                Vec3 p = vec3(object->position[0], object->position[1], object->position[2]);
+                Vec3 to_light = vec3_sub(p, origin);
+                float t = vec3_dot(to_light, direction) / SDL_max(vec3_dot(direction, direction), 1e-12f);
+                Vec3 closest = vec3_add(origin, vec3_scale(direction, t));
+                float radius = SDL_max(0.04f * vec3_length(to_light), 0.15f);
+
+                if (t > 0.0f && t < best_t && vec3_length(vec3_sub(p, closest)) < radius)
+                {
+                    best_t = t;
+                    best = i;
+                    best_face = -1;
+                }
+            }
+
+            continue;
+        }
+
         if (!model)
         {
             if (object->sprite[0] || object->is_2d)
@@ -1172,6 +1259,12 @@ static CameraMatrices camera_matrices(void)
 
     matrices.projection = mat4_multiply(to_area, projection);
     matrices.view_projection = mat4_multiply(matrices.projection, matrices.view);
+    matrices.target = target;
+    matrices.half_height = half_height;
+    matrices.area[0] = area_min.x;
+    matrices.area[1] = area_min.y;
+    matrices.area[2] = area_size.x;
+    matrices.area[3] = area_size.y;
 
     return matrices;
 }
@@ -1444,6 +1537,129 @@ static void handle_viewport_drop(const CameraMatrices* matrices)
     }
 }
 
+static bool to_screen(const CameraMatrices* matrices, Vec3 p, ImVec2* out)
+{
+    ImVec2 display = ImGui::GetIO().DisplaySize;
+    float clip[4];
+    mat4_transform(matrices->view_projection, p.x, p.y, p.z, 1.0f, clip);
+
+    if (clip[3] <= 1e-4f)
+    {
+        return false;
+    }
+
+    *out = ImVec2((clip[0] / clip[3] * 0.5f + 0.5f) * display.x, (0.5f - clip[1] / clip[3] * 0.5f) * display.y);
+    return true;
+}
+
+// Lights have nothing to draw : an icon in their color, and for the selected ones their reach.
+static void draw_light_icons(ImDrawList* draw_list, const CameraMatrices* matrices)
+{
+    draw_list->PushClipRect(central_node_min, ImVec2(central_node_min.x + central_node_size.x, central_node_min.y + central_node_size.y), true);
+
+    for (int i = 0; i < editor_scene.count; i++)
+    {
+        const SceneObject* object = &editor_scene.objects[i];
+
+        if ((object->light_type == SCENE_LIGHT_NONE && !object->reflection_probe) || hidden_now(object))
+        {
+            continue;
+        }
+
+        Mat4 matrix = scene_object_matrix(object);
+        Vec3 position = vec3(matrix.m[3], matrix.m[7], matrix.m[11]);
+        ImVec2 center;
+
+        if (!to_screen(matrices, position, &center))
+        {
+            continue;
+        }
+
+        // A reflection probe : a sphere icon, and its box when selected.
+        if (object->light_type == SCENE_LIGHT_NONE)
+        {
+            if (object->selected)
+            {
+                static const int edges[12][2] = { { 0, 1 }, { 2, 3 }, { 4, 5 }, { 6, 7 }, { 0, 2 }, { 1, 3 }, { 4, 6 }, { 5, 7 }, { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 } };
+                ImVec2 corners[8];
+                bool visible = true;
+
+                for (int c = 0; c < 8 && visible; c++)
+                {
+                    Vec3 offset = vec3(((c & 1) ? 0.5f : -0.5f) * object->probe_box[0], ((c & 2) ? 0.5f : -0.5f) * object->probe_box[1],
+                        ((c & 4) ? 0.5f : -0.5f) * object->probe_box[2]);
+                    visible = to_screen(matrices, vec3_add(position, offset), &corners[c]);
+                }
+
+                for (int e = 0; e < 12 && visible; e++)
+                {
+                    draw_list->AddLine(corners[edges[e][0]], corners[edges[e][1]], IM_COL32(120, 200, 255, 160), 1.0f);
+                }
+            }
+
+            float probe_size = 22.0f;
+            ImVec2 probe_text = ImGui::GetFont()->CalcTextSizeA(probe_size, FLT_MAX, 0.0f, ICON_GLOBE);
+            draw_list->AddCircleFilled(center, probe_size * 0.62f, object->selected ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 20, 200));
+            draw_list->AddText(ImGui::GetFont(), probe_size, ImVec2(center.x - probe_text.x * 0.5f, center.y - probe_text.y * 0.5f), IM_COL32(170, 220, 255, 255), ICON_GLOBE);
+            continue;
+        }
+
+        const float* c = object->light_color;
+        ImU32 color = IM_COL32((int)(SDL_clamp(c[0], 0.0f, 1.0f) * 255.0f), (int)(SDL_clamp(c[1], 0.0f, 1.0f) * 255.0f), (int)(SDL_clamp(c[2], 0.0f, 1.0f) * 255.0f), 255);
+        ImU32 outline = object->selected ? IM_COL32(255, 170, 40, 255) : IM_COL32(20, 20, 20, 200);
+
+        if (object->selected)
+        {
+            // The range, as three circles, and a spot's axis.
+            for (int axis = 0; axis < 3; axis++)
+            {
+                ImVec2 points[48];
+                int count = 0;
+
+                for (int s = 0; s < 48; s++)
+                {
+                    float angle = (float)s / 48.0f * 2.0f * SDL_PI_F;
+                    float a = SDL_cosf(angle) * object->light_range;
+                    float b = SDL_sinf(angle) * object->light_range;
+                    Vec3 offset = axis == 0 ? vec3(0.0f, a, b) : axis == 1 ? vec3(a, 0.0f, b) : vec3(a, b, 0.0f);
+                    ImVec2 screen;
+
+                    if (to_screen(matrices, vec3_add(position, offset), &screen))
+                    {
+                        points[count++] = screen;
+                    }
+                }
+
+                if (count == 48)
+                {
+                    draw_list->AddPolyline(points, count, IM_COL32(255, 200, 80, 110), 1.0f, ImDrawFlags_Closed);
+                }
+            }
+
+            if (object->light_type == SCENE_LIGHT_SPOT)
+            {
+                Vec3 down = vec3_normalize(vec3(-matrix.m[1], -matrix.m[5], -matrix.m[9]));
+                ImVec2 tip;
+
+                if (to_screen(matrices, vec3_add(position, vec3_scale(down, object->light_range)), &tip))
+                {
+                    draw_list->AddLine(center, tip, IM_COL32(255, 200, 80, 200), 1.5f);
+                }
+            }
+        }
+
+        const char* icon = object->light_type == SCENE_LIGHT_SPOT ? ICON_FLASHLIGHT : ICON_LIGHTBULB;
+        float size = 22.0f;
+        ImVec2 text_size = ImGui::GetFont()->CalcTextSizeA(size, FLT_MAX, 0.0f, icon);
+        ImVec2 corner(center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f);
+
+        draw_list->AddCircleFilled(center, size * 0.62f, outline);
+        draw_list->AddText(ImGui::GetFont(), size, corner, color, icon);
+    }
+
+    draw_list->PopClipRect();
+}
+
 static void draw_viewport(const CameraMatrices* matrices)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -1497,6 +1713,8 @@ static void draw_viewport(const CameraMatrices* matrices)
         ImGui::End();
         return;
     }
+
+    draw_light_icons(draw_list, matrices);
 
     ImGuizmo::SetDrawlist(draw_list);
     ImGuizmo::SetRect(0.0f, 0.0f, io.DisplaySize.x, io.DisplaySize.y);
@@ -1747,7 +1965,7 @@ static void material_of(const SceneObject* object, const PbrMaterial* source, Pb
 // if it overrides it, keeping the face's texture unless it has its own).
 static void mesh_material(const SceneObject* object, const char* path, PbrMaterial* out)
 {
-    photoreal_default_material(out);
+    render3d_default_material(out);
     out->ignore_vertex_color = 1;
     out->roughness = 0.85f;
     out->metallic = 0.0f;
@@ -1775,55 +1993,20 @@ static void mesh_material(const SceneObject* object, const char* path, PbrMateri
 static float frame_sun_direction[3];
 static float frame_sun_color[3];
 static const Environment* frame_environment;
-static Mat4 frame_forward_light;
-static float frame_forward_radius;
 
-static Mat4 forward_light_matrix(Vec3 light_direction, float* out_radius)
+void editor_sun(float out_direction[3], float out_color[3])
 {
-    Vec3 lo = vec3(1e30f, 1e30f, 1e30f);
-    Vec3 hi = vec3(-1e30f, -1e30f, -1e30f);
-
-    for (int i = 0; i < editor_scene.count; i++)
-    {
-        const SceneObject* object = &editor_scene.objects[i];
-        float bounds[6];
-
-        if ((!object->model[0] && !object->mesh) || hidden_now(object) || !editor_object_bounds(object, bounds))
-        {
-            continue;
-        }
-
-        Mat4 matrix = scene_object_matrix(object);
-
-        for (int c = 0; c < 8; c++)
-        {
-            float world[4];
-            mat4_transform(matrix, bounds[(c & 1) ? 3 : 0], bounds[(c & 2) ? 4 : 1], bounds[(c & 4) ? 5 : 2], 1.0f, world);
-
-            lo = vec3(SDL_min(lo.x, world[0]), SDL_min(lo.y, world[1]), SDL_min(lo.z, world[2]));
-            hi = vec3(SDL_max(hi.x, world[0]), SDL_max(hi.y, world[1]), SDL_max(hi.z, world[2]));
-        }
-    }
-
-    if (lo.x > hi.x)
-    {
-        lo = vec3(-1.0f, -1.0f, -1.0f);
-        hi = vec3(1.0f, 1.0f, 1.0f);
-    }
-
-    Vec3 center = vec3_scale(vec3_add(lo, hi), 0.5f);
-    float radius = SDL_max(1.0f, vec3_length(vec3_sub(hi, lo)) * 0.5f);
-    *out_radius = radius;
-
-    Vec3 eye = vec3_sub(center, vec3_scale(light_direction, radius * 2.0f));
-    Vec3 up = SDL_fabsf(light_direction.y) > 0.99f ? vec3(0.0f, 0.0f, 1.0f) : vec3(0.0f, 1.0f, 0.0f);
-
-    return mat4_multiply(mat4_orthographic(-radius, radius, -radius, radius, radius, radius * 3.0f), mat4_look_at(eye, center, up));
+    SDL_memcpy(out_direction, frame_sun_direction, sizeof(frame_sun_direction));
+    SDL_memcpy(out_color, frame_sun_color, sizeof(frame_sun_color));
 }
 
-static bool use_photoreal(void)
+const Environment* editor_environment(void)
 {
-    return photoreal_ready && editor_project.settings.render_path != RENDER_PATH_FORWARD;
+    return frame_environment;
+}
+static bool use_render3d(void)
+{
+    return render3d_ready && editor_project.settings.render_path != RENDER_PATH_2D;
 }
 
 // The parts of an editable mesh to draw : tool materials (nodraw, clip) only in the editor.
@@ -1832,55 +2015,7 @@ static bool draw_part(const EditMesh* mesh, const EditMeshGpuPart* part)
     return !playing || !asset_is_tool_material(mesh->materials[part->material]);
 }
 
-static void draw_forward_meshes(void)
-{
-    for (int i = 0; i < editor_scene.count; i++)
-    {
-        const SceneObject* object = &editor_scene.objects[i];
-
-        if (hidden_now(object))
-        {
-            continue;
-        }
-
-        if (object->mesh)
-        {
-            const EditMeshGpu* gpu = edit_mesh_gpu_get(object->mesh);
-            const EditMesh* mesh = edit_mesh_store_get(object->mesh);
-
-            if (gpu && gpu->mesh && mesh)
-            {
-                Mat4 matrix = scene_object_matrix(object);
-
-                for (int p = 0; p < gpu->part_count; p++)
-                {
-                    if (draw_part(mesh, &gpu->parts[p]))
-                    {
-                        draw_mesh_range(gpu->mesh, matrix.m, gpu->parts[p].first_index, gpu->parts[p].index_count);
-                    }
-                }
-            }
-
-            continue;
-        }
-
-        const LoadedModel* model = object->model[0] ? asset_get_model(object->model) : NULL;
-
-        if (model)
-        {
-            Mat4 matrix = scene_object_matrix(object);
-
-            if (object->override_material)
-            {
-                draw_mesh_colored(model->mesh, matrix.m, object->base_color);
-            }
-            else
-            {
-                draw_mesh(model->mesh, matrix.m);
-            }
-        }
-    }
-}
+static void prepare_sprites(void);
 
 static void prepare_rendering(void)
 {
@@ -1895,81 +2030,42 @@ static void prepare_rendering(void)
         }
     }
 
-    if (use_photoreal() || !frame_environment)
-    {
-        return;
-    }
-
-    // The forward renderer's shadow map is its own synchronous pass, before the frame.
-    Vec3 to_sun = vec3_normalize(vec3(frame_sun_direction[0], frame_sun_direction[1], frame_sun_direction[2]));
-    frame_forward_light = forward_light_matrix(vec3_scale(to_sun, -1.0f), &frame_forward_radius);
-
-    if (begin_shadow_pass(forward_shadow_map, frame_forward_light.m))
-    {
-        draw_forward_meshes();
-        end_shadow_pass();
-    }
+    prepare_sprites();
 }
 
-static void render_forward(int width, int height)
+// The scene, seen from `camera`, rendered at `width` x `height` : the view's, or a reflection probe's
+// capture (`capture` : the editor-only things left out, the quality settings fixed for a probe).
+static void render_scene_from(const Render3DCamera* render_camera, int width, int height, bool capture)
 {
-    (void)width;
-    (void)height;
+    render3d_set_environment(frame_environment, frame_sun_direction, frame_sun_color);
 
-    if (!frame_environment)
+    // The project's look, with the scene's own clouds.
+    Render3DLook look = editor_project.settings.look;
+    const SceneClouds* clouds = &editor_scene.clouds;
+    look.cloud_coverage = clouds->coverage;
+    look.cloud_density = clouds->density;
+    look.cloud_altitude = clouds->altitude;
+    look.cloud_scale = clouds->scale;
+    look.cloud_wind[0] = clouds->wind[0];
+    look.cloud_wind[1] = clouds->wind[1];
+    look.cloud_shadows = clouds->shadows;
+
+    Render3DQuality quality = editor_project.settings.quality;
+
+    if (capture)
     {
-        return;
+        // Every face rendered once, alone : nothing to accumulate, nothing to resolve.
+        quality.render_scale = 1.0f;
+        quality.taa_enabled = 0;
+        quality.msaa_samples = 1;
+        quality.sharpness = 0.0f;
+        quality.fxaa_enabled = 0;
     }
 
-    // In this path, light values are display-referred : scaled by the same exposure as the other one.
-    float exposure = 0.22f / SDL_max(frame_environment->average_luminance, 1e-3f) * SDL_powf(2.0f, editor_project.settings.look.exposure_ev);
-
-    SceneLighting lighting;
-    SDL_memcpy(lighting.view_projection, frame_matrices.view_projection.m, sizeof(lighting.view_projection));
-    SDL_memcpy(lighting.light_view_projection, frame_forward_light.m, sizeof(lighting.light_view_projection));
-
-    for (int c = 0; c < 3; c++)
-    {
-        lighting.light_direction[c] = -frame_sun_direction[c];
-        lighting.light_color[c] = SDL_min(1.0f, frame_sun_color[c] * exposure / SDL_PI_F);
-        float dc = frame_environment->sh[0][c] * 0.282095f;
-        float up = frame_environment->sh[1][c] * 0.488603f;
-        lighting.ambient_color[c] = SDL_min(1.0f, SDL_max(0.0f, dc + up) * exposure);
-        lighting.ground_color[c] = SDL_min(1.0f, SDL_max(0.0f, dc - up) * exposure);
-    }
-
-    lighting.shadow_depth_bias = 0.001f;
-    lighting.shadow_normal_offset = (2.0f * frame_forward_radius) / (float)SHADOW_MAP_SIZE * 3.0f;
-
-    begin_scene(&lighting, forward_shadow_map);
-    draw_forward_meshes();
-
-    if (editor_scene.skybox[0] || !editor_view_2d)
-    {
-        // No tone mapping here : this puts the sky's mid-gray where the other path's display encoding would.
-        draw_skybox(frame_environment->panorama, exposure * 2.27f);
-    }
-
-    end_scene();
-}
-
-static void render_photoreal(int width, int height)
-{
-    if (!frame_environment)
-    {
-        return;
-    }
-
-    photoreal_set_environment(frame_environment, frame_sun_direction, frame_sun_color);
-
-    PhotorealCamera photoreal_camera;
-    photoreal_camera.view = frame_matrices.view;
-    photoreal_camera.projection = frame_matrices.projection;
-    photoreal_camera.eye = frame_matrices.eye;
-    photoreal_camera.near_plane = frame_matrices.near_plane;
-    photoreal_camera.far_plane = frame_matrices.far_plane;
-
-    photoreal_begin(&photoreal_camera);
+    render3d_set_settings(&quality, &look);
+    render3d_begin(render_camera);
+    lighting_prepare_frame(render_camera->eye);
+    lighting_add_reflection_probes();
 
     for (int i = 0; i < editor_scene.count; i++)
     {
@@ -1988,6 +2084,7 @@ static void render_photoreal(int width, int height)
             if (gpu && gpu->mesh && mesh)
             {
                 Mat4 matrix = scene_object_matrix(object);
+                Render3DDrawOptions options = lighting_draw_options(object, gpu->vertex_count);
 
                 for (int p = 0; p < gpu->part_count; p++)
                 {
@@ -1995,7 +2092,7 @@ static void render_photoreal(int width, int height)
                     {
                         PbrMaterial material;
                         mesh_material(object, mesh->materials[gpu->parts[p].material], &material);
-                        photoreal_add(gpu->mesh, gpu->parts[p].first_index, gpu->parts[p].index_count, matrix.m, gpu->bounds, &material);
+                        render3d_add(gpu->mesh, gpu->parts[p].first_index, gpu->parts[p].index_count, matrix.m, gpu->bounds, &material, &options);
                     }
                 }
             }
@@ -2011,110 +2108,132 @@ static void render_photoreal(int width, int height)
         }
 
         Mat4 matrix = scene_object_matrix(object);
+        Render3DDrawOptions options = lighting_draw_options(object, model->data.vertex_count);
 
         for (int s = 0; s < model->data.submesh_count; s++)
         {
             const ModelSubmesh* submesh = &model->data.submeshes[s];
             PbrMaterial material;
             material_of(object, &model->materials[submesh->material], &material);
-            photoreal_add(model->mesh, submesh->first_index, submesh->index_count, matrix.m, model->bounds, &material);
+            render3d_add(model->mesh, submesh->first_index, submesh->index_count, matrix.m, submesh->bounds, &material, &options); // culled one by one
         }
     }
-
-    photoreal_render(width, height);
-    photoreal_present();
-}
-
-// Sprites and 2D shapes : textured quads, painter's order from far to near.
-static void render_sprites(int width, int height)
-{
-    static int order[SCENE_MAX_OBJECTS];
-    int count = 0;
 
     for (int i = 0; i < editor_scene.count; i++)
     {
         const SceneObject* object = &editor_scene.objects[i];
 
-        if (!object->model[0] && !object->mesh && !hidden_now(object) && (object->sprite[0] || object->is_2d))
-        {
-            order[count++] = i;
-        }
-    }
-
-    for (int i = 1; i < count; i++)
-    {
-        int current = order[i];
-        int j = i - 1;
-
-        while (j >= 0 && editor_scene.objects[order[j]].position[2] > editor_scene.objects[current].position[2])
-        {
-            order[j + 1] = order[j];
-            j--;
-        }
-
-        order[j + 1] = current;
-    }
-
-    for (int n = 0; n < count; n++)
-    {
-        const SceneObject* object = &editor_scene.objects[order[n]];
-        Mat4 matrix = mat4_multiply(frame_matrices.view_projection, scene_object_matrix(object));
-
-        int texture_width = 1;
-        int texture_height = 1;
-        Texture* texture = object->sprite[0] ? asset_get_sprite(object->sprite, &texture_width, &texture_height) : white_texture();
-
-        if (!texture)
+        if (object->light_type == SCENE_LIGHT_NONE || hidden_now(object) || lighting_light_baked_out(object))
         {
             continue;
         }
 
-        float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+        Mat4 matrix = scene_object_matrix(object);
+        Vec3 down = vec3_normalize(vec3(-matrix.m[1], -matrix.m[5], -matrix.m[9]));
+
+        Render3DLight light;
+        render3d_default_light(&light);
+        light.type = object->light_type == SCENE_LIGHT_SPOT ? RENDER3D_LIGHT_SPOT : RENDER3D_LIGHT_POINT;
+        light.position[0] = matrix.m[3];
+        light.position[1] = matrix.m[7];
+        light.position[2] = matrix.m[11];
+        light.direction[0] = down.x;
+        light.direction[1] = down.y;
+        light.direction[2] = down.z;
+        SDL_memcpy(light.color, object->light_color, sizeof(light.color));
+        light.intensity = object->light_intensity;
+        light.range = object->light_range;
+        light.spot_angle = object->light_spot_angle;
+        light.spot_softness = object->light_spot_softness;
+        light.cast_shadows = object->light_shadows;
+        light.id = (uint32_t)i;
+        render3d_add_light(&light);
+    }
+
+    render3d_render(width, height);
+}
+
+static void render_scene_3d(int width, int height)
+{
+    if (!frame_environment)
+    {
+        return;
+    }
+
+    Render3DCamera render_camera;
+    render_camera.view = frame_matrices.view;
+    render_camera.projection = frame_matrices.projection;
+    render_camera.eye = frame_matrices.eye;
+    render_camera.near_plane = frame_matrices.near_plane;
+    render_camera.far_plane = frame_matrices.far_plane;
+
+    render_scene_from(&render_camera, width, height, false);
+    render3d_present();
+}
+
+int editor_render_capture(const Render3DCamera* camera, int size)
+{
+    if (!render3d_ready || !frame_environment)
+    {
+        return 0;
+    }
+
+    render_scene_from(camera, size, size, true);
+    return 1;
+}
+
+// Sprites and 2D shapes : over the 3D scene in the 3D paths ; the 2D path draws them alone, on its
+// background, pixel perfect if the project asks for it.
+static void prepare_sprites(void)
+{
+    const ProjectSettings* settings = &editor_project.settings;
+    bool path_2d = settings->render_path == RENDER_PATH_2D;
+
+    Render2DSettings render_settings = settings->render_2d;
+
+    if (!path_2d)
+    {
+        render_settings.pixel_perfect = 0;
+        render_settings.background[3] = 0.0f; // the 3D scene is the background
+    }
+
+    Render2DCamera render_camera;
+    render_camera.view_projection = frame_matrices.view_projection;
+    render_camera.orthographic = frame_matrices.orthographic;
+    render_camera.center[0] = frame_matrices.target.x;
+    render_camera.center[1] = frame_matrices.target.y;
+    render_camera.half_height = frame_matrices.half_height;
+    SDL_memcpy(render_camera.viewport, frame_matrices.area, sizeof(render_camera.viewport));
+
+    render2d_begin(&render_camera, &render_settings);
+
+    for (int i = 0; i < editor_scene.count; i++)
+    {
+        const SceneObject* object = &editor_scene.objects[i];
+
+        if (object->model[0] || object->mesh || hidden_now(object) || (!object->sprite[0] && !object->is_2d))
+        {
+            continue;
+        }
+
+        int texture_width = 1;
+        int texture_height = 1;
+        Texture* texture = object->sprite[0] ? asset_get_sprite(object->sprite, &texture_width, &texture_height) : white_texture();
+        float uv[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
 
         if (object->sprite_region[2] > 0.0f && object->sprite_region[3] > 0.0f)
         {
-            u0 = object->sprite_region[0] / (float)texture_width;
-            v0 = object->sprite_region[1] / (float)texture_height;
-            u1 = (object->sprite_region[0] + object->sprite_region[2]) / (float)texture_width;
-            v1 = (object->sprite_region[1] + object->sprite_region[3]) / (float)texture_height;
+            uv[0] = object->sprite_region[0] / (float)texture_width;
+            uv[1] = object->sprite_region[1] / (float)texture_height;
+            uv[2] = (object->sprite_region[0] + object->sprite_region[2]) / (float)texture_width;
+            uv[3] = (object->sprite_region[1] + object->sprite_region[3]) / (float)texture_height;
         }
 
-        float hw = object->sprite_size[0] * 0.5f;
-        float hh = object->sprite_size[1] * 0.5f;
-        const float corners[4][2] = { { -hw, hh }, { hw, hh }, { hw, -hh }, { -hw, -hh } };
-        const float uvs[4][2] = { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v1 } };
-        const float* color = object->base_color;
-
-        Vertex quad[4];
-        bool visible = true;
-
-        for (int c = 0; c < 4; c++)
-        {
-            float clip[4];
-            mat4_transform(matrix, corners[c][0], corners[c][1], 0.0f, 1.0f, clip);
-
-            if (clip[3] <= 0.001f)
-            {
-                visible = false;
-                break;
-            }
-
-            quad[c].x = (clip[0] / clip[3] * 0.5f + 0.5f) * (float)width;
-            quad[c].y = (0.5f - clip[1] / clip[3] * 0.5f) * (float)height;
-            quad[c].u = uvs[c][0];
-            quad[c].v = uvs[c][1];
-            quad[c].r = color[0];
-            quad[c].g = color[1];
-            quad[c].b = color[2];
-            quad[c].a = color[3];
-        }
-
-        if (visible)
-        {
-            const Vertex triangles[6] = { quad[0], quad[1], quad[2], quad[0], quad[2], quad[3] };
-            draw_vertices(triangles, 6, texture);
-        }
+        Mat4 matrix = scene_object_matrix(object);
+        render2d_add(matrix.m, object->sprite_size, texture, uv, object->base_color);
     }
+
+    render2d_prepare();
 }
 
 // --- Example interface ------------------------------------------------------------------------
@@ -2230,6 +2349,7 @@ static void update(void)
     editor_draw_2d_views();
     editor_draw_project_settings();
     profiler_draw();
+    lighting_update();
     handle_shortcuts();
 
     // Matrices again : the camera may have moved while handling this frame's input.
@@ -2248,16 +2368,19 @@ static void render(void)
     int height = 0;
     get_window_size(&width, &height);
 
-    if (use_photoreal())
+    // While reflection probes are captured, the frame is theirs.
+    if (lighting_capture_render())
     {
-        render_photoreal(width, height);
-    }
-    else
-    {
-        render_forward(width, height);
+        profiler_render_end();
+        return;
     }
 
-    render_sprites(width, height);
+    if (use_render3d())
+    {
+        render_scene_3d(width, height);
+    }
+
+    render2d_present();
     profiler_render_end();
 }
 
@@ -2277,8 +2400,7 @@ static int init(void)
     asset_database_open(&editor_project);
     audio_init();
 
-    photoreal_ready = photoreal_create() != 0;
-    forward_shadow_map = create_shadow_map(SHADOW_MAP_SIZE);
+    render3d_ready = render3d_create() != 0;
 
     editor_view_2d = editor_project.template_kind == PROJECT_TEMPLATE_2D;
     camera.target = vec3(0.0f, editor_view_2d ? 0.0f : 0.5f, 0.0f);
@@ -2299,6 +2421,7 @@ static int init(void)
 
     if (scene_load(&editor_scene, path))
     {
+        apply_scene_view(&editor_scene);
         editor_set_status("Loaded '%s'.", editor_scene_path);
         editor_dirty = 0;
     }
@@ -2307,6 +2430,8 @@ static int init(void)
         create_default_scene(&editor_scene, editor_project.template_kind);
         editor_save_scene();
     }
+
+    lighting_scene_loaded();
 
     char title[128];
     SDL_snprintf(title, sizeof(title), "Pireneus Editor - %s", editor_project.name);
@@ -2341,11 +2466,10 @@ static void shutdown_example(void)
         procedural_valid = false;
     }
 
-    photoreal_destroy();
-    photoreal_ready = false;
-
-    destroy_shadow_map(forward_shadow_map);
-    forward_shadow_map = NULL;
+    lighting_shutdown();
+    render3d_destroy();
+    render3d_ready = false;
+    render2d_shutdown();
 
     audio_shutdown();
     level_editor_free_caches();

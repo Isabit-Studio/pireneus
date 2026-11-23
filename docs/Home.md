@@ -12,11 +12,13 @@ them as they are to the project's wiki (see [Publishing this wiki](#publishing-t
 - [Building and running](Getting-Started): requirements, Win32 and UWP builds, command line options.
 - [Architecture](Architecture): repository layout, engine modules, conventions.
 - [Examples](Examples): what each example of the menu shows.
+- [Demo scenes](Demo-Scenes): real content to test the engine on, such as the Bistro.
 
 ## The engine
 
-- [Rendering](Rendering): the RHI, 2D rendering, forward 3D rendering, the bindless GPU layer.
-- [Photorealistic rendering](Photorealistic-Rendering)
+- [Rendering](Rendering): the RHI, 2D rendering and pixel perfect, the bindless GPU layer.
+- [3D rendering](3D-Rendering): Forward+ and Deferred+, and everything they share.
+- [Baked lighting](Baked-Lighting): lightmaps, probe volume, occlusion culling, reflection probes.
 - [Shaders (Slang)](Shaders)
 - [Platforms and input](Platforms-and-Input): SDL3, window, scancode-based keyboard, paths.
 - [UWP](UWP): the Universal Windows Platform backend.

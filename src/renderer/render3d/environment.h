@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-// What lights a photorealistic scene from afar : a sky, loaded from an HDR panorama or computed from
+// What lights a 3D scene from afar : a sky, loaded from an HDR panorama or computed from
 // the sun's position. Everything is derived on the CPU when it's created, identically on every backend.
 typedef struct
 {
@@ -26,6 +26,10 @@ typedef struct
 // contains a sun, it's taken out of the image and becomes the directional light, whose shadows it
 // casts. 0 on failure.
 int environment_load(const char* path, Environment* out_environment);
+
+// From an equirectangular panorama already in memory : RGB floats, top row first (a reflection probe's
+// capture). 0 on failure.
+int environment_create_from_pixels(const float* rgb, int width, int height, Environment* out_environment);
 
 // A physically based sky (Rayleigh and Mie single scattering) for a sun in this direction.
 int environment_create_procedural(const float sun_direction[3], Environment* out_environment);

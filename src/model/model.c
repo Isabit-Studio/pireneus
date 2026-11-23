@@ -11,6 +11,11 @@
 
 #include "debug.h"
 
+// FBX files are split into submeshes by material and by cells of space this large (meters), coarser if
+// there would be more than MODEL_MAX_SUBMESHES (each is a draw).
+#define MODEL_SUBMESH_CELL 8.0f
+#define MODEL_MAX_SUBMESHES 1536
+
 // Arrays growing as the file is read, then handed over to ModelData.
 typedef struct
 {
@@ -246,6 +251,30 @@ static void finish(Builder* builder, ModelData* out_model)
             out_model->bounds_max[axis] = SDL_max(out_model->bounds_max[axis], position[axis]);
         }
     }
+
+    // Each submesh's own box, for culling.
+    for (int i = 0; i < builder->submesh_count; i++)
+    {
+        ModelSubmesh* submesh = &builder->submeshes[i];
+
+        for (int axis = 0; axis < 3; axis++)
+        {
+            submesh->bounds[axis] = FLT_MAX;
+            submesh->bounds[axis + 3] = -FLT_MAX;
+        }
+
+        for (int k = 0; k < submesh->index_count; k++)
+        {
+            const MeshVertex* v = &builder->vertices[builder->indices[submesh->first_index + k]];
+            const float position[3] = { v->x, v->y, v->z };
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                submesh->bounds[axis] = SDL_min(submesh->bounds[axis], position[axis]);
+                submesh->bounds[axis + 3] = SDL_max(submesh->bounds[axis + 3], position[axis]);
+            }
+        }
+    }
 }
 
 // --- FBX, OBJ (ufbx) ----------------------------------------------------------------------------
@@ -265,6 +294,33 @@ static int fbx_texture(Builder* builder, const char* directory, const ufbx_mater
     }
 
     return add_external_texture(builder, directory, texture->relative_filename.length ? texture->relative_filename.data : texture->filename.data);
+}
+
+// Whether a texture in the specular slot is in fact occlusion, roughness and metalness packed together :
+// by its name, as Lumberyard and Falcor (the Bistro) or Unreal ("_ORM") name them.
+static int fbx_is_packed_map(const ufbx_material_map* map)
+{
+    if (!map->texture)
+    {
+        return 0;
+    }
+
+    const char* name = map->texture->relative_filename.length ? map->texture->relative_filename.data : map->texture->filename.data;
+    const char* dot = SDL_strrchr(name, '.');
+    size_t length = dot ? (size_t)(dot - name) : SDL_strlen(name);
+    const char* suffixes[] = { "_Specular", "_ORM" };
+
+    for (int i = 0; i < 2; i++)
+    {
+        size_t n = SDL_strlen(suffixes[i]);
+
+        if (length >= n && SDL_strncasecmp(name + length - n, suffixes[i], n) == 0)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static void fbx_read_material(Builder* builder, const char* directory, const ufbx_material* source, ModelMaterial* material)
@@ -322,6 +378,78 @@ static void fbx_read_material(Builder* builder, const char* directory, const ufb
         material->roughness = 1.0f;
         material->metallic = 0.0f;
     }
+    else if (fbx_is_packed_map(&source->fbx.specular_color))
+    {
+        // A packed map in the specular slot (Lumberyard's, Falcor's) : R occlusion, G roughness, B metal.
+        int packed = fbx_texture(builder, directory, &source->fbx.specular_color);
+        material->metallic_roughness_texture = packed;
+        material->roughness = 1.0f;
+        material->metallic = 1.0f;
+
+        if (material->occlusion_texture == MODEL_NO_TEXTURE)
+        {
+            material->occlusion_texture = packed;
+        }
+    }
+
+    // FBX says nothing reliable about cutouts : the base color's alpha decides, once loaded.
+    material->alpha_from_texture = 1;
+}
+
+// A piece of the model as the file has it : one node's faces of one material, welded.
+typedef struct
+{
+    int material;
+    int first_index;
+    int index_count;
+    float center[3];
+    int cell[3];
+} FbxPiece;
+
+static int compare_pieces(const void* a, const void* b)
+{
+    const FbxPiece* p = a;
+    const FbxPiece* q = b;
+
+    if (p->material != q->material)
+    {
+        return p->material < q->material ? -1 : 1;
+    }
+
+    for (int axis = 0; axis < 3; axis++)
+    {
+        if (p->cell[axis] != q->cell[axis])
+        {
+            return p->cell[axis] < q->cell[axis] ? -1 : 1;
+        }
+    }
+
+    return 0;
+}
+
+// Pieces of one material in one cell of space become one submesh. The cells grow until there are few
+// enough submeshes : each is a draw, culled by its own bounds, so a large scene (a whole street) isn't
+// drawn in full for every view, shadow or probe.
+static int group_pieces(FbxPiece* pieces, int count, float cell_size)
+{
+    for (int i = 0; i < count; i++)
+    {
+        for (int axis = 0; axis < 3; axis++)
+        {
+            pieces[i].cell[axis] = (int)SDL_floorf(pieces[i].center[axis] / cell_size);
+        }
+    }
+
+    SDL_qsort(pieces, (size_t)count, sizeof(FbxPiece), compare_pieces);
+
+    int groups = 0;
+
+    for (int i = 0; i < count; i++)
+    {
+        groups += i == 0 || compare_pieces(&pieces[i - 1], &pieces[i]) != 0;
+    }
+
+    return groups;
 }
 
 static int load_ufbx(const char* path, Builder* builder)
@@ -344,7 +472,9 @@ static int load_ufbx(const char* path, Builder* builder)
     directory_of(path, directory, sizeof(directory));
 
     size_t max_face_triangles = 0;
+    size_t max_part_triangles = 0;
     size_t triangle_count = 0;
+    int piece_capacity = 0;
 
     for (size_t i = 0; i < scene->nodes.count; i++)
     {
@@ -354,6 +484,14 @@ static int load_ufbx(const char* path, Builder* builder)
         {
             max_face_triangles = SDL_max(max_face_triangles, mesh->max_face_triangles);
             triangle_count += mesh->num_triangles;
+            piece_capacity += (int)SDL_max(1, mesh->material_parts.count);
+
+            for (size_t p = 0; p < mesh->material_parts.count; p++)
+            {
+                max_part_triangles = SDL_max(max_part_triangles, mesh->material_parts.data[p].num_triangles);
+            }
+
+            max_part_triangles = SDL_max(max_part_triangles, mesh->material_parts.count == 0 ? mesh->num_triangles : 0);
         }
     }
 
@@ -364,12 +502,9 @@ static int load_ufbx(const char* path, Builder* builder)
         return 0;
     }
 
-    uint32_t* face_indices = SDL_malloc(sizeof(uint32_t) * max_face_triangles * 3);
-
     // One material per entry of the scene, plus a last one for faces with none.
     builder->material_count = (int)scene->materials.count + 1;
     builder->materials = SDL_malloc(sizeof(ModelMaterial) * (size_t)builder->material_count);
-    builder->submeshes = SDL_malloc(sizeof(ModelSubmesh) * (size_t)builder->material_count);
 
     for (size_t m = 0; m < scene->materials.count; m++)
     {
@@ -378,42 +513,44 @@ static int load_ufbx(const char* path, Builder* builder)
 
     fbx_read_material(builder, directory, NULL, &builder->materials[scene->materials.count]);
 
-    // Material by material, so each becomes one contiguous submesh.
-    for (size_t m = 0; m <= scene->materials.count; m++)
+    uint32_t* face_indices = SDL_malloc(sizeof(uint32_t) * max_face_triangles * 3);
+    MeshVertex* part_vertices = SDL_malloc(sizeof(MeshVertex) * max_part_triangles * 3);
+    uint32_t* part_indices = SDL_malloc(sizeof(uint32_t) * max_part_triangles * 3);
+    FbxPiece* pieces = SDL_malloc(sizeof(FbxPiece) * (size_t)piece_capacity);
+    int piece_count = 0;
+
+    // Node by node, material part by material part : each part's corners are welded (identical
+    // position, normal, UV) into an indexed piece.
+    for (size_t n = 0; n < scene->nodes.count; n++)
     {
-        const ufbx_material* wanted = m < scene->materials.count ? scene->materials.data[m] : NULL;
-        int first_index = builder->index_count;
+        const ufbx_node* node = scene->nodes.data[n];
+        const ufbx_mesh* mesh = node->mesh;
 
-        for (size_t n = 0; n < scene->nodes.count; n++)
+        if (!mesh)
         {
-            const ufbx_node* node = scene->nodes.data[n];
-            const ufbx_mesh* mesh = node->mesh;
+            continue;
+        }
 
-            if (!mesh)
+        ufbx_matrix normal_matrix = ufbx_matrix_for_normals(&node->geometry_to_world);
+        size_t part_count = SDL_max(1, mesh->material_parts.count);
+
+        for (size_t p = 0; p < part_count; p++)
+        {
+            const ufbx_mesh_part* part = mesh->material_parts.count ? &mesh->material_parts.data[p] : NULL;
+            size_t face_count = part ? part->face_indices.count : mesh->faces.count;
+            int material = (int)scene->materials.count;
+
+            if (part && part->index < mesh->materials.count && mesh->materials.data[part->index])
             {
-                continue;
+                material = (int)mesh->materials.data[part->index]->typed_id;
             }
 
-            ufbx_matrix normal_matrix = ufbx_matrix_for_normals(&node->geometry_to_world);
+            size_t corner_count = 0;
 
-            for (size_t f = 0; f < mesh->faces.count; f++)
+            for (size_t f = 0; f < face_count; f++)
             {
-                const ufbx_material* material = NULL;
-
-                if (mesh->face_material.count > f && mesh->face_material.data[f] < mesh->materials.count)
-                {
-                    material = mesh->materials.data[mesh->face_material.data[f]];
-                }
-
-                if (material != wanted)
-                {
-                    continue;
-                }
-
-                ufbx_face face = mesh->faces.data[f];
+                ufbx_face face = mesh->faces.data[part ? part->face_indices.data[f] : f];
                 uint32_t face_triangles = ufbx_triangulate_face(face_indices, max_face_triangles * 3, mesh, face);
-
-                builder_reserve(builder, (int)face_triangles * 3, (int)face_triangles * 3);
 
                 for (uint32_t c = 0; c < face_triangles * 3; c++)
                 {
@@ -430,7 +567,8 @@ static int load_ufbx(const char* path, Builder* builder)
                         normal.z /= normal_length;
                     }
 
-                    MeshVertex* vertex = &builder->vertices[builder->vertex_count];
+                    // Zeroed first : welding compares whole vertices, padding included.
+                    MeshVertex* vertex = &part_vertices[corner_count++];
                     SDL_zerop(vertex);
                     vertex->x = (float)position.x;
                     vertex->y = (float)position.y;
@@ -438,10 +576,10 @@ static int load_ufbx(const char* path, Builder* builder)
                     vertex->nx = (float)normal.x;
                     vertex->ny = (float)normal.y;
                     vertex->nz = (float)normal.z;
-                    vertex->r = builder->materials[m].base_color[0];
-                    vertex->g = builder->materials[m].base_color[1];
-                    vertex->b = builder->materials[m].base_color[2];
-                    vertex->a = builder->materials[m].base_color[3];
+                    vertex->r = builder->materials[material].base_color[0];
+                    vertex->g = builder->materials[material].base_color[1];
+                    vertex->b = builder->materials[material].base_color[2];
+                    vertex->a = builder->materials[material].base_color[3];
 
                     if (mesh->vertex_uv.exists)
                     {
@@ -449,24 +587,107 @@ static int load_ufbx(const char* path, Builder* builder)
                         vertex->u = (float)uv.x;
                         vertex->v = 1.0f - (float)uv.y; // FBX V goes up, textures' V goes down
                     }
-
-                    builder->indices[builder->index_count++] = (uint32_t)builder->vertex_count;
-                    builder->vertex_count++;
                 }
             }
-        }
 
-        if (builder->index_count > first_index)
-        {
-            ModelSubmesh* submesh = &builder->submeshes[builder->submesh_count++];
-            submesh->first_index = first_index;
-            submesh->index_count = builder->index_count - first_index;
-            submesh->material = (int)m;
+            if (corner_count == 0)
+            {
+                continue;
+            }
+
+            ufbx_vertex_stream stream = { part_vertices, corner_count, sizeof(MeshVertex) };
+            size_t unique = ufbx_generate_indices(&stream, 1, part_indices, corner_count, NULL, &error);
+
+            if (error.type != UFBX_ERROR_NONE)
+            {
+                // Not welded, then : every corner its own vertex.
+                unique = corner_count;
+
+                for (size_t c = 0; c < corner_count; c++)
+                {
+                    part_indices[c] = (uint32_t)c;
+                }
+            }
+
+            builder_reserve(builder, (int)unique, (int)corner_count);
+            int base = builder->vertex_count;
+            SDL_memcpy(&builder->vertices[base], part_vertices, sizeof(MeshVertex) * unique);
+            builder->vertex_count += (int)unique;
+
+            FbxPiece* piece = &pieces[piece_count++];
+            piece->material = material;
+            piece->first_index = builder->index_count;
+            piece->index_count = (int)corner_count;
+
+            float lo[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+            float hi[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+
+            for (size_t v = 0; v < unique; v++)
+            {
+                const float position[3] = { part_vertices[v].x, part_vertices[v].y, part_vertices[v].z };
+
+                for (int axis = 0; axis < 3; axis++)
+                {
+                    lo[axis] = SDL_min(lo[axis], position[axis]);
+                    hi[axis] = SDL_max(hi[axis], position[axis]);
+                }
+            }
+
+            for (int axis = 0; axis < 3; axis++)
+            {
+                piece->center[axis] = (lo[axis] + hi[axis]) * 0.5f;
+            }
+
+            for (size_t c = 0; c < corner_count; c++)
+            {
+                builder->indices[builder->index_count++] = (uint32_t)base + part_indices[c];
+            }
         }
     }
 
     SDL_free(face_indices);
+    SDL_free(part_vertices);
+    SDL_free(part_indices);
     ufbx_free_scene(scene);
+
+    // The pieces, grouped : a cell of space per submesh and material, as small as the budget allows.
+    float cell_size = MODEL_SUBMESH_CELL;
+    int groups = group_pieces(pieces, piece_count, cell_size);
+
+    while (groups > MODEL_MAX_SUBMESHES && cell_size < 1e6f)
+    {
+        cell_size *= 1.5f;
+        groups = group_pieces(pieces, piece_count, cell_size);
+    }
+
+    // The index buffer, reordered so each group is contiguous.
+    uint32_t* indices = SDL_malloc(sizeof(uint32_t) * (size_t)SDL_max(1, builder->index_count));
+    builder->submeshes = SDL_malloc(sizeof(ModelSubmesh) * (size_t)SDL_max(1, groups));
+    builder->submesh_count = 0;
+    int written = 0;
+
+    for (int i = 0; i < piece_count; i++)
+    {
+        if (i == 0 || compare_pieces(&pieces[i - 1], &pieces[i]) != 0)
+        {
+            ModelSubmesh* submesh = &builder->submeshes[builder->submesh_count++];
+            SDL_zerop(submesh);
+            submesh->first_index = written;
+            submesh->material = pieces[i].material;
+        }
+
+        SDL_memcpy(&indices[written], &builder->indices[pieces[i].first_index], sizeof(uint32_t) * (size_t)pieces[i].index_count);
+        written += pieces[i].index_count;
+        builder->submeshes[builder->submesh_count - 1].index_count += pieces[i].index_count;
+    }
+
+    SDL_free(builder->indices);
+    builder->indices = indices;
+    builder->index_capacity = SDL_max(1, builder->index_count);
+    SDL_free(pieces);
+
+    DEBUG_LOG("[model] %d pieces in %d submeshes (cells of %.1f m), %d vertices for %d triangles\n", piece_count, builder->submesh_count,
+        (double)cell_size, builder->vertex_count, builder->index_count / 3);
 
     return 1;
 }

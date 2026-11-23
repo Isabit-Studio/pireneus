@@ -12,8 +12,12 @@ A "Menu" button, at the bottom right, goes back to the menu.
 | `2d-test` | 2D Test | A Tiled map (`resources/2D-test/`) panned by a camera, drawn by the sprite batch with culling. |
 | `pixel-perfect` | Pixel Perfect | The same map, see [below](#pixel-perfect). |
 | `tilemap-editor` | Tilemap Editor | A Tiled map editor, see [below](#tilemap-editor). |
-| `3d-test` | 3D Test | The forward renderer on `resources/3D-test/Debug.fbx`: one directional light, a 2048×2048 shadow map, an orbiting camera. |
-| `photoreal` | Photorealistic Rendering | The photorealistic renderer on the same scene, under a procedural sky, with an orbiting camera. |
+| `forward-plus` | Forward+ Rendering | [Forward+](3D-Rendering) on `resources/3D-test/Debug.fbx`, under a procedural sky with clouds, an orbiting camera, MSAA. |
+| `deferred-plus` | Deferred+ Rendering | The same scene in [Deferred+](3D-Rendering): sharpened TAA, reflections, realtime GI where the GPU traces rays. |
+
+In both, **Tab** switches to the other pipeline, and **N** to night: 128 colored point lights circle the
+scene in a light fog, and a spot light and a point light cast shadows. Both examples are one source file,
+`examples/render3d/main.c`.
 
 ### Pixel Perfect
 
@@ -29,7 +33,8 @@ A "Menu" button, at the bottom right, goes back to the menu.
 - Saves to `<map>_edited.json`.
 
 The **editor** (`scene-editor`) is an `Example` too, but it opens through a project: see
-[Editor](Editor).
+[Editor](Editor). The menu also lists the demo projects of `demos/`, such as the Bistro: see
+[Demo scenes](Demo-Scenes).
 
 ## Adding an example
 

@@ -36,19 +36,12 @@ typedef struct
 
     Mesh* (*create_mesh)(const MeshVertex*, int, const uint32_t*, int);
     void (*destroy_mesh)(Mesh*);
-    ShadowMap* (*create_shadow_map)(int);
-    void (*destroy_shadow_map)(ShadowMap*);
-    int (*begin_shadow_pass)(ShadowMap*, const float*);
-    void (*end_shadow_pass)(void);
-    void (*begin_scene)(const SceneLighting*, ShadowMap*);
-    void (*end_scene)(void);
-    void (*draw_mesh)(Mesh*, const float*, int first_index, int index_count); // index_count < 0 : all
-    void (*draw_skybox)(Texture*, float);
 
     // gpu.h
     int (*gpu_supported)(void);
     Texture* (*gpu_create_texture)(const GpuTextureDesc*);
     uint32_t (*gpu_texture_index)(Texture*);
+    int (*gpu_read_texture)(Texture*, void*, size_t);
     GpuBuffer* (*gpu_create_buffer)(const void*, size_t);
     void (*gpu_destroy_buffer)(GpuBuffer*);
     uint32_t (*gpu_buffer_index)(GpuBuffer*);
@@ -60,10 +53,12 @@ typedef struct
     void (*gpu_begin_pass)(const GpuPassDesc*);
     void (*gpu_end_pass)(void);
     void (*gpu_bind_pipeline)(GpuPipeline*);
+    void (*gpu_set_viewport)(int, int, int, int);
     void (*gpu_push_constants)(const void*, int);
     void (*gpu_draw)(int);
     void (*gpu_draw_indexed)(Mesh*, int, int);
     int (*gpu_raytracing_supported)(void);
+    int (*gpu_format_supported)(GpuFormat format);
     uint32_t (*gpu_build_ray_scene)(const GpuRayInstance*, int);
 
     // Statistics : fills only what the backend knows (backend, gpu_name, gpu_frame_ms, vram_*).

@@ -1,8 +1,8 @@
-// The environment of the photorealistic renderer, computed on the CPU : the irradiance's spherical
+// The environment of the 3D renderers (render3d.h), computed on the CPU : the irradiance's spherical
 // harmonics, a GGX prefiltered mip chain of the panorama, and the sun (found in an HDR panorama and
 // removed from it, or placed in a procedural Nishita sky).
 
-#include "renderer/photoreal/environment.h"
+#include "renderer/render3d/environment.h"
 
 #include <SDL3/SDL.h>
 #include <stdio.h>
@@ -10,7 +10,7 @@
 
 #include "assets/hdr_image.h"
 #include "renderer/gpu.h"
-#include "renderer/photoreal/half_float.h"
+#include "renderer/render3d/half_float.h"
 #include "debug.h"
 
 #define PANORAMA_MAX_WIDTH 2048
@@ -21,7 +21,7 @@
 #define PI_F 3.14159265f
 
 // Panoramas : U around the horizon (-Z at its center), V from straight up to straight down, as
-// panorama_uv() in photoreal.slang.
+// panorama_uv() in render3d_common.slang.
 static void panorama_direction(float u, float v, float out[3])
 {
     float theta = v * PI_F;
@@ -752,6 +752,29 @@ static void sky_row(int y, void* context)
             pixel[c] = haze[c] + (job->ground[c] - haze[c]) * t;
         }
     }
+}
+
+int environment_create_from_pixels(const float* rgb, int width, int height, Environment* out_environment)
+{
+    SDL_zerop(out_environment);
+
+    if (!rgb || width < 4 || height < 2)
+    {
+        return 0;
+    }
+
+    Image image;
+    image.width = width;
+    image.height = height;
+    image.pixels = (float*)rgb;
+
+    if (!build(&image, &image, out_environment))
+    {
+        environment_destroy(out_environment);
+        return 0;
+    }
+
+    return 1;
 }
 
 int environment_create_procedural(const float sun_direction[3], Environment* out_environment)

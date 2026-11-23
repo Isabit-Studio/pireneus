@@ -13,29 +13,46 @@
 set(PIRENEUS_SHADER_ENTRY_POINTS
     "sprite.slang,vertexMain,vertex,sprite.vert.spv,vs_6_0,sprite_vs.cso"
     "sprite.slang,fragmentMain,fragment,sprite.frag.spv,ps_6_0,sprite_ps.cso"
-    "mesh.slang,shadowVertexMain,vertex,mesh_shadow.vert.spv,vs_6_0,mesh_shadow_vs.cso"
-    "mesh.slang,sceneVertexMain,vertex,mesh.vert.spv,vs_6_0,mesh_vs.cso"
-    "mesh.slang,sceneFragmentMain,fragment,mesh.frag.spv,ps_6_0,mesh_ps.cso"
-    "mesh.slang,skyVertexMain,vertex,sky.vert.spv,vs_6_0,sky_vs.cso"
-    "mesh.slang,skyFragmentMain,fragment,sky.frag.spv,ps_6_0,sky_ps.cso"
-    "photoreal.slang,prShadowVs,vertex,pr_shadow_vs.spv,vs_6_0,pr_shadow_vs.cso"
-    "photoreal.slang,prShadowMaskedVs,vertex,pr_shadow_masked_vs.spv,vs_6_0,pr_shadow_masked_vs.cso"
-    "photoreal.slang,prShadowMaskedPs,fragment,pr_shadow_masked_ps.spv,ps_6_0,pr_shadow_masked_ps.cso"
-    "photoreal.slang,prVisibilityVs,vertex,pr_visibility_vs.spv,vs_6_0,pr_visibility_vs.cso"
-    "photoreal.slang,prVisibilityPs,fragment,pr_visibility_ps.spv,ps_6_0,pr_visibility_ps.cso"
-    "photoreal.slang,prScreenVs,vertex,pr_screen_vs.spv,vs_6_0,pr_screen_vs.cso"
-    "photoreal.slang,prAoPs,fragment,pr_ao_ps.spv,ps_6_0,pr_ao_ps.cso"
-    "photoreal.slang,prAoBlurPs,fragment,pr_ao_blur_ps.spv,ps_6_0,pr_ao_blur_ps.cso"
-    "photoreal.slang,prShadePs,fragment,pr_shade_ps.spv,ps_6_0,pr_shade_ps.cso"
-    "photoreal.slang,prBloomDownPs,fragment,pr_bloom_down_ps.spv,ps_6_0,pr_bloom_down_ps.cso"
-    "photoreal.slang,prBloomUpPs,fragment,pr_bloom_up_ps.spv,ps_6_0,pr_bloom_up_ps.cso"
-    "photoreal.slang,prTonemapPs,fragment,pr_tonemap_ps.spv,ps_6_0,pr_tonemap_ps.cso"
-    "photoreal.slang,prFxaaPs,fragment,pr_fxaa_ps.spv,ps_6_0,pr_fxaa_ps.cso"
+    "render3d.slang,r3ShadowVs,vertex,r3_shadow_vs.spv,vs_6_0,r3_shadow_vs.cso"
+    "render3d.slang,r3ShadowMaskedVs,vertex,r3_shadow_masked_vs.spv,vs_6_0,r3_shadow_masked_vs.cso"
+    "render3d.slang,r3ShadowMaskedPs,fragment,r3_shadow_masked_ps.spv,ps_6_0,r3_shadow_masked_ps.cso"
+    "render3d.slang,r3LocalShadowVs,vertex,r3_local_shadow_vs.spv,vs_6_0,r3_local_shadow_vs.cso"
+    "render3d.slang,r3LocalShadowMaskedVs,vertex,r3_local_shadow_masked_vs.spv,vs_6_0,r3_local_shadow_masked_vs.cso"
+    "render3d.slang,r3ClearDepthVs,vertex,r3_clear_depth_vs.spv,vs_6_0,r3_clear_depth_vs.cso"
+    "render3d.slang,r3GeometryVs,vertex,r3_geometry_vs.spv,vs_6_0,r3_geometry_vs.cso"
+    "render3d.slang,r3ScreenVs,vertex,r3_screen_vs.spv,vs_6_0,r3_screen_vs.cso"
+    "render3d.slang,r3SkyVs,vertex,r3_sky_vs.spv,vs_6_0,r3_sky_vs.cso"
+    "render3d.slang,r3SkyPs,fragment,r3_sky_ps.spv,ps_6_0,r3_sky_ps.cso"
+    "render3d.slang,r3ResolveDepthPs,fragment,r3_resolve_depth_ps.spv,ps_6_0,r3_resolve_depth_ps.cso"
+    "render3d.slang,r3ResolveColorPs,fragment,r3_resolve_color_ps.spv,ps_6_0,r3_resolve_color_ps.cso"
+    "render3d.slang,r3AoPs,fragment,r3_ao_ps.spv,ps_6_0,r3_ao_ps.cso"
+    "render3d.slang,r3AoBlurPs,fragment,r3_ao_blur_ps.spv,ps_6_0,r3_ao_blur_ps.cso"
+    "render3d.slang,r3BloomDownPs,fragment,r3_bloom_down_ps.spv,ps_6_0,r3_bloom_down_ps.cso"
+    "render3d.slang,r3BloomUpPs,fragment,r3_bloom_up_ps.spv,ps_6_0,r3_bloom_up_ps.cso"
+    "render3d.slang,r3TonemapPs,fragment,r3_tonemap_ps.spv,ps_6_0,r3_tonemap_ps.cso"
+    "render3d.slang,r3FxaaPs,fragment,r3_fxaa_ps.spv,ps_6_0,r3_fxaa_ps.cso"
+    "render3d.slang,r3TaaPs,fragment,r3_taa_ps.spv,ps_6_0,r3_taa_ps.cso"
+    "render3d.slang,r3VolumetricsPs,fragment,r3_volumetrics_ps.spv,ps_6_0,r3_volumetrics_ps.cso"
+    "render3d.slang,r3VolumetricsCompositePs,fragment,r3_volumetrics_composite_ps.spv,ps_6_0,r3_volumetrics_composite_ps.cso"
+    "render3d.slang,r3SharpenPs,fragment,r3_sharpen_ps.spv,ps_6_0,r3_sharpen_ps.cso"
+    "realtime_gi.slang,r3GiTracePs,fragment,r3_gi_trace_ps.spv,ps_6_5,r3_gi_trace_ps.cso"
+    "realtime_gi.slang,r3GiUpdatePs,fragment,r3_gi_update_ps.spv,ps_6_5,r3_gi_update_ps.cso"
+    "forward_plus.slang,fpForwardVs,vertex,fp_forward_vs.spv,vs_6_0,fp_forward_vs.cso"
+    "forward_plus.slang,fpDepthMaskedPs,fragment,fp_depth_masked_ps.spv,ps_6_0,fp_depth_masked_ps.cso"
+    "forward_plus.slang,fpForwardPs,fragment,fp_forward_ps.spv,ps_6_0,fp_forward_ps.cso"
+    "deferred_plus.slang,dpVisibilityPs,fragment,dp_visibility_ps.spv,ps_6_0,dp_visibility_ps.cso"
+    "deferred_plus.slang,dpShadePs,fragment,dp_shade_ps.spv,ps_6_0,dp_shade_ps.cso"
+    "deferred_plus.slang,dpShadeSurfacePs,fragment,dp_shade_surface_ps.spv,ps_6_0,dp_shade_surface_ps.cso"
+    "deferred_plus.slang,dpReflectionsPs,fragment,dp_reflections_ps.spv,ps_6_0,dp_reflections_ps.cso"
+    "deferred_plus.slang,dpCompositePs,fragment,dp_composite_ps.spv,ps_6_0,dp_composite_ps.cso"
 )
 
 function(pireneus_compile_shaders)
     set(shader_binary_dir ${CMAKE_BINARY_DIR}/shaders)
     set(shader_source_dir ${CMAKE_SOURCE_DIR}/src/renderer/shaders)
+
+    # Sources #include each other (render3d_common.slang) : any change rebuilds every entry point.
+    file(GLOB shader_sources CONFIGURE_DEPENDS ${shader_source_dir}/*.slang)
     set(generated_dir ${CMAKE_BINARY_DIR}/generated_shaders)
     set(outputs "")
 
@@ -79,7 +96,7 @@ function(pireneus_compile_shaders)
             OUTPUT ${spv_output}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${shader_binary_dir}
             COMMAND ${slangc_executable} ${shader_source} -entry ${entry_point} -stage ${stage} -target spirv -profile spirv_1_5 -warnings-disable 41012 -o ${spv_output}
-            DEPENDS ${shader_source}
+            DEPENDS ${shader_sources}
             VERBATIM
         )
 
@@ -92,7 +109,7 @@ function(pireneus_compile_shaders)
             OUTPUT ${generated_hlsl}
             COMMAND ${CMAKE_COMMAND} -E make_directory ${generated_dir}
             COMMAND ${slangc_executable} ${shader_source} -entry ${entry_point} -stage ${stage} -target hlsl -o ${generated_hlsl}
-            DEPENDS ${shader_source}
+            DEPENDS ${shader_sources}
             VERBATIM
         )
 
@@ -110,10 +127,13 @@ function(pireneus_compile_shaders)
     add_custom_target(pireneus_shaders DEPENDS ${outputs})
 endfunction()
 
-# Copies the shared compiled shaders next to TARGET's own output, after TARGET is built.
+# Copies the shared compiled shaders next to TARGET's own output. A target of its own, run on every build
+# (copy_directory only copies what changed) : a POST_BUILD step would only run when TARGET is linked
+# again, and leave a shader-only change behind.
 function(pireneus_copy_shaders TARGET)
-    add_dependencies(${TARGET} pireneus_shaders)
-    add_custom_command(TARGET ${TARGET} POST_BUILD
+    add_custom_target(${TARGET}_shaders ALL
         COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_BINARY_DIR}/shaders $<TARGET_FILE_DIR:${TARGET}>/shaders
     )
+    add_dependencies(${TARGET}_shaders pireneus_shaders)
+    add_dependencies(${TARGET} ${TARGET}_shaders)
 endfunction()

@@ -4,10 +4,12 @@
 - [Building and running](Getting-Started)
 - [Architecture](Architecture)
 - [Examples](Examples)
+- [Demo scenes](Demo-Scenes)
 
 **Engine**
 - [Rendering](Rendering)
-- [Photorealistic rendering](Photorealistic-Rendering)
+- [3D rendering](3D-Rendering)
+- [Baked lighting](Baked-Lighting)
 - [Shaders](Shaders)
 - [Platforms and input](Platforms-and-Input)
 - [UWP](UWP)

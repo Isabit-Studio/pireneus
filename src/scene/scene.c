@@ -18,6 +18,12 @@ void scene_init(Scene* scene)
     scene->sun_pitch = 0.75f;
     scene->sun_intensity = 1.0f;
     scene->use_environment_sun = 1;
+    scene->clouds.density = 0.6f;
+    scene->clouds.altitude = 1500.0f;
+    scene->clouds.scale = 900.0f;
+    scene->clouds.wind[0] = 8.0f;
+    scene->clouds.wind[1] = 3.0f;
+    scene->clouds.shadows = 0.6f;
 }
 
 void scene_object_init(SceneObject* object, const char* name)
@@ -32,6 +38,15 @@ void scene_object_init(SceneObject* object, const char* name)
     object->density = 1.0f;
     object->friction = 0.6f;
     object->audio_volume = 1.0f;
+    object->light_color[0] = object->light_color[1] = object->light_color[2] = 1.0f;
+    object->light_intensity = 10.0f;
+    object->light_range = 10.0f;
+    object->light_spot_angle = 60.0f;
+    object->light_spot_softness = 0.3f;
+    object->light_mode = SCENE_LIGHT_MIXED;
+    object->probe_box[0] = object->probe_box[1] = object->probe_box[2] = 10.0f;
+    object->probe_blend = 1.0f;
+    object->probe_resolution = 128;
 }
 
 void scene_rotation_from_euler(const float degrees[3], float out[9])
@@ -152,8 +167,19 @@ int scene_save(const Scene* scene, const char* path)
 
     write_text(&w, "{\n  ");
     write_string(&w, "skybox", scene->skybox);
-    write_text(&w, ",\n  \"sun\": { \"yaw\": %g, \"pitch\": %g, \"intensity\": %g, \"from_environment\": %d },\n  \"objects\": [\n",
+    const SceneClouds* clouds = &scene->clouds;
+    write_text(&w, ",\n  \"sun\": { \"yaw\": %g, \"pitch\": %g, \"intensity\": %g, \"from_environment\": %d },\n",
         scene->sun_yaw, scene->sun_pitch, scene->sun_intensity, scene->use_environment_sun);
+    write_text(&w, "  \"clouds\": { \"coverage\": %g, \"density\": %g, \"altitude\": %g, \"scale\": %g, \"wind\": [%g, %g], \"shadows\": %g },\n",
+        clouds->coverage, clouds->density, clouds->altitude, clouds->scale, clouds->wind[0], clouds->wind[1], clouds->shadows);
+
+    if (scene->has_view)
+    {
+        write_text(&w, "  \"view\": { \"target\": [%g, %g, %g], \"yaw\": %g, \"pitch\": %g, \"distance\": %g },\n", scene->view_target[0],
+            scene->view_target[1], scene->view_target[2], scene->view_yaw, scene->view_pitch, scene->view_distance);
+    }
+
+    write_text(&w, "  \"objects\": [\n");
 
     for (int i = 0; i < scene->count; i++)
     {
@@ -204,6 +230,19 @@ int scene_save(const Scene* scene, const char* path)
             write_text(&w, ", ");
             write_string(&w, "metallic_roughness", o->metallic_roughness_texture);
             write_text(&w, " }");
+        }
+
+        if (o->light_type != SCENE_LIGHT_NONE)
+        {
+            write_text(&w, ", \"light\": { \"type\": %d, \"color\": [%g, %g, %g], \"intensity\": %g, \"range\": %g, \"spot_angle\": %g, \"spot_softness\": %g, \"shadows\": %d, \"mode\": %d }",
+                o->light_type, o->light_color[0], o->light_color[1], o->light_color[2], o->light_intensity, o->light_range, o->light_spot_angle,
+                o->light_spot_softness, o->light_shadows, o->light_mode);
+        }
+
+        if (o->reflection_probe)
+        {
+            write_text(&w, ", \"reflection_probe\": { \"box\": [%g, %g, %g], \"blend\": %g, \"resolution\": %d }",
+                o->probe_box[0], o->probe_box[1], o->probe_box[2], o->probe_blend, o->probe_resolution);
         }
 
         if (o->body_type != SCENE_BODY_NONE || o->is_character)
@@ -289,6 +328,26 @@ int scene_load(Scene* scene, const char* path)
     scene->sun_intensity = (float)json_number(json_object_get(sun, "intensity"), scene->sun_intensity);
     scene->use_environment_sun = json_int(json_object_get(sun, "from_environment"), scene->use_environment_sun);
 
+    const JsonValue* clouds = json_object_get(root, "clouds");
+    scene->clouds.coverage = (float)json_number(json_object_get(clouds, "coverage"), scene->clouds.coverage);
+    scene->clouds.density = (float)json_number(json_object_get(clouds, "density"), scene->clouds.density);
+    scene->clouds.altitude = (float)json_number(json_object_get(clouds, "altitude"), scene->clouds.altitude);
+    scene->clouds.scale = (float)json_number(json_object_get(clouds, "scale"), scene->clouds.scale);
+    scene->clouds.wind[0] = (float)json_number(json_array_get(json_object_get(clouds, "wind"), 0), scene->clouds.wind[0]);
+    scene->clouds.wind[1] = (float)json_number(json_array_get(json_object_get(clouds, "wind"), 1), scene->clouds.wind[1]);
+    scene->clouds.shadows = (float)json_number(json_object_get(clouds, "shadows"), scene->clouds.shadows);
+
+    const JsonValue* view = json_object_get(root, "view");
+
+    if (view)
+    {
+        scene->has_view = 1;
+        read_floats(json_object_get(view, "target"), scene->view_target, 3);
+        scene->view_yaw = (float)json_number(json_object_get(view, "yaw"), 0.75);
+        scene->view_pitch = (float)json_number(json_object_get(view, "pitch"), 0.45);
+        scene->view_distance = (float)json_number(json_object_get(view, "distance"), 12.0);
+    }
+
     const JsonValue* objects = json_object_get(root, "objects");
 
     for (size_t i = 0; i < json_array_count(objects) && scene->count < SCENE_MAX_OBJECTS; i++)
@@ -337,6 +396,41 @@ int scene_load(Scene* scene, const char* path)
             read_string(material, "albedo", o->albedo_texture, sizeof(o->albedo_texture));
             read_string(material, "normal", o->normal_texture, sizeof(o->normal_texture));
             read_string(material, "metallic_roughness", o->metallic_roughness_texture, sizeof(o->metallic_roughness_texture));
+        }
+
+        const JsonValue* light = json_object_get(entry, "light");
+
+        if (light)
+        {
+            o->light_type = SDL_clamp(json_int(json_object_get(light, "type"), SCENE_LIGHT_POINT), SCENE_LIGHT_NONE, SCENE_LIGHT_SPOT);
+            const JsonValue* color = json_object_get(light, "color");
+
+            for (int c = 0; c < 3; c++)
+            {
+                o->light_color[c] = (float)json_number(json_array_get(color, c), o->light_color[c]);
+            }
+
+            o->light_intensity = (float)json_number(json_object_get(light, "intensity"), o->light_intensity);
+            o->light_range = (float)json_number(json_object_get(light, "range"), o->light_range);
+            o->light_spot_angle = (float)json_number(json_object_get(light, "spot_angle"), o->light_spot_angle);
+            o->light_spot_softness = (float)json_number(json_object_get(light, "spot_softness"), o->light_spot_softness);
+            o->light_shadows = json_int(json_object_get(light, "shadows"), 0);
+            o->light_mode = SDL_clamp(json_int(json_object_get(light, "mode"), o->light_mode), SCENE_LIGHT_REALTIME, SCENE_LIGHT_BAKED);
+        }
+
+        const JsonValue* probe = json_object_get(entry, "reflection_probe");
+
+        if (probe)
+        {
+            o->reflection_probe = 1;
+
+            for (int c = 0; c < 3; c++)
+            {
+                o->probe_box[c] = (float)json_number(json_array_get(json_object_get(probe, "box"), c), o->probe_box[c]);
+            }
+
+            o->probe_blend = (float)json_number(json_object_get(probe, "blend"), o->probe_blend);
+            o->probe_resolution = SDL_clamp(json_int(json_object_get(probe, "resolution"), o->probe_resolution), 32, 1024);
         }
 
         const JsonValue* physics = json_object_get(entry, "physics");

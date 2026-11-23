@@ -10,19 +10,21 @@ The editor (`examples/scene-editor/`) opens on a project, from the main menu or 
 | `asset_browser.cpp` | Asset browser |
 | `level_editor.cpp` | Level design tools (see [Level editing](Level-Editing)) |
 | `profiler.cpp` | FPS counter and detailed statistics (see [Profiler](#profiler)) |
+| `lighting.cpp` | Baked lighting: the Lighting menu, bakes, reflection probe captures (see [Baked lighting](Baked-Lighting)) |
 | `editor.h` | What those files share |
 
 ## Layout
 
-- **Menu bar**: File, Edit, View, Object, Profiler, with Play, Pause and Step in the middle (Ctrl+P).
+- **Menu bar**: File, Edit, View, Object, Lighting, Profiler, with Play, Pause and Step in the middle
+  (Ctrl+P). Object adds empties, point and spot lights, reflection probes, meshes and primitives.
 - **Panels**, dockable to the edges:
   - Primitives: palette of the built-in primitives;
   - Tools: objects mode snapping, grid, 2D view, sky and sun, controls help;
   - Level and Materials: level editing;
   - 2D Views;
   - Hierarchy: Ctrl for multiple selection, eye icon to hide;
-  - Inspector: Transform, Model or Mesh, Sprite, Material, Rigid Body, Character Controller,
-    Audio Source, Add Component;
+  - Inspector: Transform, Model or Mesh, Sprite, Material, Light, Reflection Probe, Rigid Body,
+    Character Controller, Audio Source, Add Component;
   - Project Settings;
   - Assets.
 - **Asset browser**:
@@ -31,7 +33,9 @@ The editor (`examples/scene-editor/`) opens on a project, from the main menu or 
   - drag and drop from the system, into the view or the inspector;
   - rename, recycle bin, new folder, sound preview.
 
-The view renders the way the project says: photorealistic or forward.
+The view renders the way the project says: Deferred+, Forward+ or 2D (pixel perfect if the project asks
+for it). Lights and reflection probes show as icons in the view; the selected ones show their reach or
+their box.
 
 ## 3D view controls
 

@@ -13,6 +13,8 @@
 #include "imgui.h"
 
 #define ICON_BOX "\xee\x81\xa1"         // U+E061
+#define ICON_LIGHTBULB "\xee\x87\x82"   // U+E1C2
+#define ICON_FLASHLIGHT "\xee\x83\x93"  // U+E0D3
 #define ICON_CONE "\xee\x94\xa3"        // U+E523
 #define ICON_CYLINDER "\xee\x94\xa5"    // U+E525
 #define ICON_TORUS "\xee\x94\xaf"       // U+E52F

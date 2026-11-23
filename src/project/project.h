@@ -3,7 +3,9 @@
 
 #include <stdint.h>
 
-#include "renderer/photoreal/photoreal.h"
+#include "bake/bake.h"
+#include "renderer/render3d/render3d.h"
+#include "renderer/render2d/render2d.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,8 +26,9 @@ typedef enum
 
 typedef enum
 {
-    RENDER_PATH_PHOTOREAL,
-    RENDER_PATH_FORWARD   // the simple forward renderer, for GPUs that can't run the other, or for speed
+    RENDER_PATH_DEFERRED_PLUS, // see renderer/render3d
+    RENDER_PATH_FORWARD_PLUS,
+    RENDER_PATH_2D             // sprites only, see renderer/render2d
 } RenderPath;
 
 typedef enum
@@ -63,11 +66,17 @@ typedef struct
 
     // Rendering
     int render_path;               // RenderPath
-    PhotorealLook look;
+    Render3DLook look;
+    Render2DSettings render_2d;    // the 2D path : pixel perfect, background
 
     // Render quality
     int quality_preset;            // QualityPreset
-    PhotorealQuality quality;
+    Render3DQuality quality;
+
+    // Baked lighting (bake/bake.h) : how to bake, and whether to use it
+    BakeSettings bake;             // its sky : the scene's, at bake time
+    int use_baked_lighting;
+    int occlusion_culling;
 
     // Audio
     float master_volume;
